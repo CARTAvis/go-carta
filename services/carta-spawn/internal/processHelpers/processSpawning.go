@@ -69,9 +69,9 @@ func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Du
 		}
 	}
 
-	slog.Info("Spawning worker process", "workerPath", workerPath, "args", args)
-
-	cmd := exec.CommandContext(ctx, workerPath, args...)
+	slog.Info("Spawning worker process", "workerPath", workerPath, "username", username, "args", args)
+	
+	cmd := exec.CommandContext(ctx, "sudo", append([]string{"-u", username, workerPath}, args...)...)
 
 	// Capture stdout/stderr so we can watch for the readiness log while still
 	// forwarding output to the parent process' stdio.
