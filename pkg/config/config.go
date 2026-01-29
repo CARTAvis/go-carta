@@ -42,16 +42,17 @@ type ControllerConfig struct {
 	Hostname           string     `mapstructure:"hostname"`
 	FrontendDir        string     `mapstructure:"frontend_dir"`
 	SpawnerAddress     string     `mapstructure:"spawner_address"`
-	BaseFolder         string     `mapstructure:"base_folder"`
 	AuthMode           AuthMode   `mapstructure:"auth_mode"`
 	DBConnectionString string     `mapstructure:"db_conn_string"`
 }
 
 type SpawnerConfig struct {
-	WorkerExec string        `mapstructure:"worker_exec"`
-	Timeout    time.Duration `mapstructure:"timeout"`
-	Port       int           `mapstructure:"port"`
-	Hostname   string        `mapstructure:"hostname"`
+	WorkerExec  string        `mapstructure:"worker_exec"`
+	Timeout     time.Duration `mapstructure:"timeout"`
+	Port        int           `mapstructure:"port"`
+	Hostname    string        `mapstructure:"hostname"`
+	BaseDir     string        `mapstructure:"base_dir"`
+	TopLevelDir string        `mapstructure:"top_level_dir"`
 }
 
 // Config holds common configuration values shared across all services
@@ -69,7 +70,6 @@ func setControllerDefaults(v *viper.Viper) {
 	v.SetDefault("controller.hostname", "")
 	v.SetDefault("controller.frontend_dir", "")
 	v.SetDefault("controller.spawner_address", "http://localhost:8080")
-	v.SetDefault("controller.base_folder", "")
 	v.SetDefault("controller.auth_mode", AuthNone)
 
 	v.SetDefault("controller.pam.service_name", "carta")
@@ -85,6 +85,8 @@ func setSpawnerDefaults(v *viper.Viper) {
 	v.SetDefault("spawner.timeout", 5*time.Second)
 	v.SetDefault("spawner.port", 8080)
 	v.SetDefault("spawner.hostname", "")
+	v.SetDefault("spawner.base_dir", "")
+	v.SetDefault("spawner.top_level_dir", "")
 }
 
 func setDefaults(v *viper.Viper) {

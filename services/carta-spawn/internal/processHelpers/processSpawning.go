@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/user"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -36,7 +38,12 @@ func parsePortFromLine(line string) (int, bool) {
 // it is listening ("server listening at ..."). The worker is started with
 // -port=0 so the OS selects a free port, and the detected port from the log is
 // returned.
-func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Duration, baseFolder string) (*exec.Cmd, int, error) {
+func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Duration, username string, baseDir string, topLevelDir string) (*exec.Cmd, int, error) {
+	user, err := user.Lookup(username)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to lookup user %s: %w", username, err)
+	}
+
 	args := []string{"--debug_no_auth"}
 	args = append(args, "--no_frontend")
 	args = append(args, "--no_database")
@@ -45,8 +52,21 @@ func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Du
 	args = append(args, "--exit_timeout", "10")
 	args = append(args, "--initial_timeout", "20")
 	args = append(args, "--idle_timeout", "300")
-	if baseFolder != "" {
-		args = append(args, "--base", baseFolder)
+	if topLevelDir != "" {
+		args = append(args, "--top_level_folder", topLevelDir)
+	}
+
+	// Adding as a positional argument so startup folder should be last option
+	if baseDir != "" {
+		resolvedBaseDir := strings.ReplaceAll(baseDir, "~", user.HomeDir)
+		resolvedBaseDir = strings.ReplaceAll(resolvedBaseDir, "{username}", username)
+		args = append(args, resolvedBaseDir)
+	} else {
+		if user.HomeDir != "" {
+			args = append(args, user.HomeDir)
+		} else {
+			slog.Warn("User has no home directory", "username", username)
+		}
 	}
 
 	slog.Info("Spawning worker process", "workerPath", workerPath, "args", args)
