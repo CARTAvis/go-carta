@@ -85,18 +85,21 @@ func (h *DbConfig) EnsureTables() error {
     );
 
 	CREATE TABLE IF NOT EXISTS workspaces (
-    name     TEXT NOT NULL,
-    username TEXT NOT NULL,
-    id       UUID DEFAULT gen_random_uuid(),
-    content  JSONB NOT NULL,
+		name     TEXT NOT NULL,
+		username TEXT NOT NULL,
+		id       UUID,
+		content  JSONB NOT NULL,
 
-    -- Keep top-level 'id' out of the JSON content to avoid confusion
-    CONSTRAINT no_top_level_id CHECK (NOT (content ? 'id')),
+		-- Whether the workspace is shared with other users
+		shared   BOOLEAN,
 
-	-- But ensure it remains unique giving the sharing possibility
-	CONSTRAINT unique_workspace_id UNIQUE (id),
+		-- Keep top-level 'id' out of the JSON content to avoid confusion
+		CONSTRAINT no_top_level_id CHECK (NOT (content ? 'id')),
 
-	PRIMARY KEY (username, name)
+		-- But ensure it remains unique (if defined)
+		CONSTRAINT unique_workspace_id UNIQUE (id),
+
+		PRIMARY KEY (username, name)
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_workspaces_username
@@ -741,9 +744,13 @@ func (h *DbConfig) handleGetWorkspaceByKey(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Query DB
-	var raw json.RawMessage
-	err := h.db.GetContext(r.Context(), &raw,
-		`SELECT * FROM workspaces WHERE id = $1 AND username = $2`,
+	var row struct {
+		Shared   sql.NullBool    `db:"shared"`
+		Content  json.RawMessage `db:"content"`
+		Editable bool            `db:"is_editable"`
+	}
+	err := h.db.GetContext(r.Context(), &row,
+		`SELECT shared, content, (username = $2) AS is_editable FROM workspaces WHERE id = $1 AND (username = $2 OR shared = true)`,
 		key,
 		user,
 	)
@@ -762,10 +769,17 @@ func (h *DbConfig) handleGetWorkspaceByKey(w http.ResponseWriter, r *http.Reques
 
 	default:
 		// Decode JSONB from DB
-		if err := json.Unmarshal(raw, &workspace); err != nil {
+		if err := json.Unmarshal(row.Content, &workspace); err != nil {
 			slog.Debug("Failed to decode stored workspace", "key", key, "err", err)
 			writeJSONResponse(w, http.StatusInternalServerError, fmt.Sprintf("Failed to decode stored workspace: %v", key))
 			return
+		}
+
+		// Add ID and shared status to the workspace
+		workspace["id"] = key
+		workspace["editable"] = row.Editable
+		if row.Shared.Valid {
+			workspace["shared"] = row.Shared.Bool
 		}
 
 		// Validate
@@ -806,9 +820,10 @@ func (h *DbConfig) handleGetWorkspaceByName(w http.ResponseWriter, r *http.Reque
 	var row struct {
 		ID      string          `db:"id"`
 		Content json.RawMessage `db:"content"`
+		Shared  sql.NullBool    `db:"shared"`
 	}
 	err := h.db.GetContext(r.Context(), &row,
-		`SELECT content FROM workspaces WHERE name = $1 AND username = $2`,
+		`SELECT content, shared FROM workspaces WHERE name = $1 AND username = $2`,
 		name,
 		user,
 	)
@@ -834,6 +849,12 @@ func (h *DbConfig) handleGetWorkspaceByName(w http.ResponseWriter, r *http.Reque
 		}
 
 		workspace["id"] = row.ID
+		workspace["editable"] = true
+
+		// Add shared status to workspace
+		if row.Shared.Valid {
+			workspace["shared"] = row.Shared.Bool
+		}
 
 		// Validate
 		if err := h.PrefSchema.Validate(workspace); err != nil {
@@ -894,6 +915,10 @@ func (h *DbConfig) handleSetWorkspace(w http.ResponseWriter, r *http.Request) {
 	if id_exists {
 		delete(body.Workspace, "id")
 	}
+	shared, shared_exists := body.Workspace["shared"]
+	if shared_exists {
+		delete(body.Workspace, "shared")
+	}
 
 	// Marshal workspace to JSONB
 	jsonBytes, err := json.Marshal(body.Workspace)
@@ -907,21 +932,21 @@ func (h *DbConfig) handleSetWorkspace(w http.ResponseWriter, r *http.Request) {
 	if id_exists {
 		_, err = h.db.ExecContext(
 			r.Context(),
-			`INSERT INTO workspaces (name, username, id, content)
+			`INSERT INTO workspaces (name, username, shared, id, content)
 			VALUES ($1, $2, $3, $4::jsonb)
 			ON CONFLICT (name, username)
-			DO UPDATE SET content = EXCLUDED.content, id = EXCLUDED.id`,
-			body.WorkspaceName, user, id, jsonBytes,
+			DO UPDATE SET content = EXCLUDED.content, id = EXCLUDED.id, shared = EXCLUDED.shared`,
+			body.WorkspaceName, user, shared, jsonBytes,
 		)
 	} else {
 		err = h.db.QueryRowContext(
 			r.Context(),
-			`INSERT INTO workspaces (name, username, content)
+			`INSERT INTO workspaces (name, username, shared, content)
 			VALUES ($1, $2, $3::jsonb)
 			ON CONFLICT (name, username)
-			DO UPDATE SET content = EXCLUDED.content
+			DO UPDATE SET content = EXCLUDED.content, shared = EXCLUDED.shared
 			RETURNING id`,
-			body.WorkspaceName, user, jsonBytes,
+			body.WorkspaceName, user, shared, jsonBytes,
 		).Scan(&id)
 	}
 
@@ -933,6 +958,9 @@ func (h *DbConfig) handleSetWorkspace(w http.ResponseWriter, r *http.Request) {
 
 	body.Workspace["id"] = id
 	body.Workspace["editable"] = true
+	if shared_exists {
+		body.Workspace["shared"] = shared
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(map[string]any{
