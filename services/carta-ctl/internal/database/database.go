@@ -87,7 +87,7 @@ func (h *DbConfig) EnsureTables() error {
 	CREATE TABLE IF NOT EXISTS workspaces (
 		name     TEXT NOT NULL,
 		username TEXT NOT NULL,
-		id       UUID,
+		id       UUID NOT NULL DEFAULT gen_random_uuid(),
 		content  JSONB NOT NULL,
 
 		-- Whether the workspace is shared with other users
@@ -161,11 +161,13 @@ func getUsername(r *http.Request) string {
 	return user.Username
 }
 
+/*
 func notImplemented(w http.ResponseWriter, r *http.Request) {
 	slog.Warn(fmt.Sprintf("DB API called: %s %s (not implemented)", r.Method, r.URL.Path))
 	w.WriteHeader(http.StatusNotImplemented)
 	_, _ = w.Write([]byte("Not implemented"))
 }
+*/
 
 func writeJSONResponse(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
@@ -933,16 +935,16 @@ func (h *DbConfig) handleSetWorkspace(w http.ResponseWriter, r *http.Request) {
 		_, err = h.db.ExecContext(
 			r.Context(),
 			`INSERT INTO workspaces (name, username, shared, id, content)
-			VALUES ($1, $2, $3, $4::jsonb)
+			VALUES ($1, $2, $3, $4, $5::jsonb)
 			ON CONFLICT (name, username)
 			DO UPDATE SET content = EXCLUDED.content, id = EXCLUDED.id, shared = EXCLUDED.shared`,
-			body.WorkspaceName, user, shared, jsonBytes,
+			body.WorkspaceName, user, shared, id, jsonBytes,
 		)
 	} else {
 		err = h.db.QueryRowContext(
 			r.Context(),
 			`INSERT INTO workspaces (name, username, shared, content)
-			VALUES ($1, $2, $3::jsonb)
+			VALUES ($1, $2, $3, $4::jsonb)
 			ON CONFLICT (name, username)
 			DO UPDATE SET content = EXCLUDED.content, shared = EXCLUDED.shared
 			RETURNING id`,
@@ -1101,6 +1103,62 @@ func (h *DbConfig) handleClearWorkspace(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+func (h *DbConfig) handleShareWorkspace(w http.ResponseWriter, r *http.Request) {
+	slog.Debug(fmt.Sprintf("DB API called: %s %s", r.Method, r.URL.Path))
+
+	user := getUsername(r)
+	if user == "" {
+		writeJSONResponse(w, http.StatusInternalServerError, "Username not found, but passed authorization")
+		return
+	} else {
+		slog.Debug("Sharing workspace for user", "user", user)
+	}
+
+	workspaceID := r.PathValue("id")
+	if workspaceID == "" {
+		writeJSONResponse(w, http.StatusBadRequest, "Missing workspace ID")
+		return
+	}
+
+	// Update DB to set shared = true
+	result, err := h.db.ExecContext(
+		r.Context(),
+		`UPDATE workspaces
+		 SET shared = true
+		 WHERE id = $1 AND username = $2`,
+		workspaceID, user,
+	)
+
+	if err != nil {
+		slog.Error("Error sharing workspace", "err", err)
+		writeJSONResponse(w, http.StatusInternalServerError, "Problem sharing workspace")
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		slog.Error("Error getting rows affected for sharing workspace", "err", err)
+		writeJSONResponse(w, http.StatusInternalServerError, "Problem sharing workspace")
+		return
+	}
+
+	if rowsAffected == 0 {
+		slog.Debug("No workspace found to share", "workspaceID", workspaceID, "user", user)
+		writeJSONResponse(w, http.StatusNotFound, "Workspace not found or not owned by user")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"success":  true,
+		"shareKey": workspaceID,
+		"id":       workspaceID,
+	}); err != nil {
+		slog.Error("Error encoding JSON response", "err", err)
+	}
+}
+
 func (h *DbConfig) Router() http.Handler {
 	mux := http.NewServeMux()
 
@@ -1116,7 +1174,7 @@ func (h *DbConfig) Router() http.Handler {
 	mux.Handle("PUT /snippet", http.HandlerFunc(h.handleSetSnippet))
 	mux.Handle("DELETE /snippet", http.HandlerFunc(h.handleClearSnippet))
 
-	mux.Handle("POST /share/workspace/{id}", http.HandlerFunc(notImplemented))
+	mux.Handle("POST /share/workspace/{id}", http.HandlerFunc(h.handleShareWorkspace))
 
 	mux.Handle("GET /list/workspaces", http.HandlerFunc(h.handleListWorkspaces))
 	mux.Handle("GET /workspace/key/{key}", http.HandlerFunc(h.handleGetWorkspaceByKey))
