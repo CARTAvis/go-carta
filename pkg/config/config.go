@@ -51,7 +51,7 @@ type SpawnerConfig struct {
 	Timeout     time.Duration `mapstructure:"timeout"`
 	Port        int           `mapstructure:"port"`
 	Hostname    string        `mapstructure:"hostname"`
-	BaseDir     string        `mapstructure:"base_dir"`
+	BaseDirTmpl string        `mapstructure:"base_dir_tmpl"`
 	TopLevelDir string        `mapstructure:"top_level_dir"`
 }
 

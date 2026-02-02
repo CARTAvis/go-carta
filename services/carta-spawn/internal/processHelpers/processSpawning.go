@@ -2,6 +2,7 @@ package processHelpers
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -11,7 +12,7 @@ import (
 	"os/user"
 	"regexp"
 	"strconv"
-	"strings"
+	"text/template"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -38,7 +39,7 @@ func parsePortFromLine(line string) (int, bool) {
 // it is listening ("server listening at ..."). The worker is started with
 // -port=0 so the OS selects a free port, and the detected port from the log is
 // returned.
-func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Duration, username string, baseDir string, topLevelDir string) (*exec.Cmd, int, error) {
+func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Duration, username string, baseDirTmpl string, topLevelDir string) (*exec.Cmd, int, error) {
 	user, err := user.Lookup(username)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to lookup user %s: %w", username, err)
@@ -57,13 +58,31 @@ func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Du
 	}
 
 	// Adding as a positional argument so startup folder should be last option
-	if baseDir != "" {
-		resolvedBaseDir := strings.ReplaceAll(baseDir, "~", user.HomeDir)
-		resolvedBaseDir = strings.ReplaceAll(resolvedBaseDir, "{username}", username)
-		args = append(args, resolvedBaseDir)
+	if baseDirTmpl != "" {
+		var buf bytes.Buffer
+		tmpl, err := template.New("base_dir_tmpl").Parse(baseDirTmpl)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to parse base_dir_tmpl: %w", err)
+		}
+		err = tmpl.Execute(&buf, map[string]string{
+			"user": username,
+			"home": user.HomeDir,
+		})
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to execute base_dir_tmpl: %w", err)
+		}
+		args = append(args, buf.String())
 	} else {
 		if user.HomeDir != "" {
-			args = append(args, user.HomeDir)
+			info, err := os.Stat(user.HomeDir)
+			if err != nil {
+				slog.Error("Failed to stat home directory", "username", username, "error", err)
+			}
+			if !info.IsDir() {
+				slog.Warn("User home directory is not a directory", "username", username, "home_dir", user.HomeDir)
+			} else {
+				args = append(args, user.HomeDir)
+			}
 		} else {
 			slog.Warn("User has no home directory", "username", username)
 		}

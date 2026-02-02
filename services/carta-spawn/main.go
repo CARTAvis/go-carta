@@ -86,7 +86,7 @@ func main() {
 
 		slog.Info("Process started", "username", reqBody.Username)
 
-		cmd, port, err := processHelpers.SpawnWorker(ctx, cfg.Spawner.WorkerExec, cfg.Spawner.Timeout, reqBody.Username, cfg.Spawner.BaseDir, cfg.Spawner.TopLevelDir)
+		cmd, port, err := processHelpers.SpawnWorker(ctx, cfg.Spawner.WorkerExec, cfg.Spawner.Timeout, reqBody.Username, cfg.Spawner.BaseDirTmpl, cfg.Spawner.TopLevelDir)
 		spawnerDuration := time.Since(startTime)
 		if err != nil {
 			slog.Error("Error spawning worker on free port", "error", err)

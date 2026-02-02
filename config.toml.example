@@ -81,9 +81,11 @@ port = 8080
 hostname = ""
 
 # Base directory for user data access
-# If empty, defaults to $HOME
-# References to {username} in the string will be replaced with the username
-base_dir = ""
+# If empty, defaults to the user's home directory
+# 
+# References to {{{.user}}} in the string will be replaced with the username of the user
+# and "{{.home}}" will be replaced by the user's home directory
+base_dir_tmpl = ""
 
 # Top level directory for user data access
 top_level_dir = "/"
