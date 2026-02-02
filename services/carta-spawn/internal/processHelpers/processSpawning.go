@@ -71,7 +71,16 @@ func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Du
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to execute base_dir_tmpl: %w", err)
 		}
-		args = append(args, buf.String())
+		resolvedDir := buf.String()
+		slog.Debug("Resolved base directory from template", "template", baseDirTmpl, "resolved", resolvedDir)
+		info, err := os.Stat(resolvedDir)
+		if err != nil {
+			slog.Error("Failed to stat resolved base directory. Omitting it.", "directory", resolvedDir, "error", err)
+		} else if !info.IsDir() {
+			slog.Warn("Resolved base directory is not a directory. Omitting it.", "directory", resolvedDir)
+		} else{
+			args = append(args, resolvedDir)
+		}
 	} else {
 		if user.HomeDir != "" {
 			info, err := os.Stat(user.HomeDir)
