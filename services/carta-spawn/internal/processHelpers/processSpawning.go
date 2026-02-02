@@ -78,7 +78,7 @@ func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Du
 			slog.Error("Failed to stat resolved base directory. Omitting it.", "directory", resolvedDir, "error", err)
 		} else if !info.IsDir() {
 			slog.Warn("Resolved base directory is not a directory. Omitting it.", "directory", resolvedDir)
-		} else{
+		} else {
 			args = append(args, resolvedDir)
 		}
 	} else {
