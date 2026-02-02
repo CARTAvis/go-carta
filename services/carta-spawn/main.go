@@ -40,7 +40,7 @@ func main() {
 	pflag.String("hostname", "", "Hostname to listen on")
 	pflag.String("worker_exec", "carta_backend", "Path to worker executable")
 	pflag.String("base_dir", "", "Starting directory for data")
-	pflag.String("top_level_dir", "", "Top level directory for data")
+	pflag.String("top_level_dir", "", "Top-level directory for data")
 	pflag.Int("timeout", 5, "Spawn timeout in seconds")
 	pflag.String("override", "", "Override simple config values (string, int, bool) as comma-separated key:value pairs (e.g., spawner.port:9000,log_level:debug)")
 
