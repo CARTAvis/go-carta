@@ -49,3 +49,9 @@ services:
 .PHONY: tidy
 tidy:
 	go mod tidy -v
+
+## clean: 🗑️ Remove build artifacts and caches
+.PHONY: clean
+clean:
+	go clean -cache -modcache
+	rm -f ./build/*
