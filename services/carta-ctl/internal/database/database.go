@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"unicode/utf8"
 
 	"database/sql"
 	"github.com/jmoiron/sqlx"
@@ -740,6 +742,19 @@ func (h *DbConfig) handleGetWorkspaceByKey(w http.ResponseWriter, r *http.Reques
 	}
 
 	key := r.PathValue("key")
+	key, err := url.PathUnescape(key)
+	if err != nil {
+		writeJSONResponse(w, http.StatusBadRequest, "Invalid URL encoding")
+		return
+	}
+	if key == "" {
+		writeJSONResponse(w, http.StatusInternalServerError, "Missing key")
+		return
+	}
+	if !utf8.ValidString(key) {
+		writeJSONResponse(w, http.StatusBadRequest, "Invalid UTF-8 in workspace key")
+		return
+	}
 	if key == "" {
 		writeJSONResponse(w, http.StatusInternalServerError, "Missing key")
 		return
@@ -751,7 +766,7 @@ func (h *DbConfig) handleGetWorkspaceByKey(w http.ResponseWriter, r *http.Reques
 		Content  json.RawMessage `db:"content"`
 		Editable bool            `db:"is_editable"`
 	}
-	err := h.db.GetContext(r.Context(), &row,
+	err = h.db.GetContext(r.Context(), &row,
 		`SELECT shared, content, (username = $2) AS is_editable FROM workspaces WHERE id = $1 AND (username = $2 OR shared = true)`,
 		key,
 		user,
@@ -813,8 +828,17 @@ func (h *DbConfig) handleGetWorkspaceByName(w http.ResponseWriter, r *http.Reque
 	}
 
 	name := r.PathValue("name")
+	name, err := url.PathUnescape(name)
+	if err != nil {
+		writeJSONResponse(w, http.StatusBadRequest, "Invalid URL encoding")
+		return
+	}
 	if name == "" {
 		writeJSONResponse(w, http.StatusInternalServerError, "Missing name")
+		return
+	}
+	if !utf8.ValidString(name) {
+		writeJSONResponse(w, http.StatusBadRequest, "Invalid UTF-8 in workspace name")
 		return
 	}
 
@@ -824,8 +848,8 @@ func (h *DbConfig) handleGetWorkspaceByName(w http.ResponseWriter, r *http.Reque
 		Content json.RawMessage `db:"content"`
 		Shared  sql.NullBool    `db:"shared"`
 	}
-	err := h.db.GetContext(r.Context(), &row,
-		`SELECT content, shared FROM workspaces WHERE name = $1 AND username = $2`,
+	err = h.db.GetContext(r.Context(), &row,
+		`SELECT id, content, shared FROM workspaces WHERE name = $1 AND username = $2`,
 		name,
 		user,
 	)
@@ -1016,17 +1040,12 @@ func (h *DbConfig) handleListWorkspaces(w http.ResponseWriter, r *http.Request) 
 
 		if date.Valid {
 			workspaces = append(workspaces, map[string]any{
-				"_id":  id,
 				"id":   id,
 				"date": date.String,
 				"name": name,
-				"workspace": map[string]any{
-					"date": date.String,
-				},
 			})
 		} else {
 			workspaces = append(workspaces, map[string]any{
-				"_id":  id,
 				"id":   id,
 				"name": name,
 			})
@@ -1115,6 +1134,15 @@ func (h *DbConfig) handleShareWorkspace(w http.ResponseWriter, r *http.Request) 
 	}
 
 	workspaceID := r.PathValue("id")
+	workspaceID, err := url.PathUnescape(workspaceID)
+	if err != nil {
+		writeJSONResponse(w, http.StatusBadRequest, "Invalid URL encoding")
+		return
+	}
+	if !utf8.ValidString(workspaceID) {
+		writeJSONResponse(w, http.StatusBadRequest, "Invalid UTF-8 in workspace ID")
+		return
+	}
 	if workspaceID == "" {
 		writeJSONResponse(w, http.StatusBadRequest, "Missing workspace ID")
 		return
