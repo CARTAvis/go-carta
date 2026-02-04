@@ -85,7 +85,7 @@ func setSpawnerDefaults(v *viper.Viper) {
 	v.SetDefault("spawner.timeout", 5*time.Second)
 	v.SetDefault("spawner.port", 8080)
 	v.SetDefault("spawner.hostname", "")
-	v.SetDefault("spawner.base_dir", "")
+	v.SetDefault("spawner.base_dir_tmpl", "{{.home}}")
 	v.SetDefault("spawner.top_level_dir", "")
 }
 

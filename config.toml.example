@@ -85,7 +85,7 @@ hostname = ""
 # 
 # References to {{{.user}}} in the string will be replaced with the username of the user
 # and "{{.home}}" will be replaced by the user's home directory
-base_dir_tmpl = ""
+base_dir_tmpl = "{{.home}}"
 
 # Top level directory for user data access
 top_level_dir = "/"
