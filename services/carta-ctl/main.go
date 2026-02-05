@@ -413,7 +413,7 @@ func main() {
 
 		cfg := map[string]string{
 			//"dashboardAddress": "/dashboard", // no dashboard
-			"apiAddress":       "/api",
+			"apiAddress": "/api",
 			//"tokenRefreshAddress":  "/api/auth/refresh",
 			//"logoutAddress": "/api/auth/logout",
 			//"authPath":      "/api/auth/refresh",
