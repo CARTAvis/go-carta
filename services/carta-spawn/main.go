@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
 
@@ -68,10 +68,10 @@ func main() {
 
 	workerMap := make(map[string]*WorkerInfo)
 
-	r := chi.NewRouter()
+	r := http.NewServeMux()
 
 	// Start a new worker
-	r.Post("/", func(w http.ResponseWriter, r *http.Request) {
+	r.Handle("POST /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		startTime := time.Now()
 
 		// parse the username from the request body
@@ -121,10 +121,10 @@ func main() {
 		}
 
 		httpHelpers.WriteOutput(w, map[string]any{"port": port, "address": workerHostname, "workerId": workerId.String()})
-	})
+	}))
 
 	// List all workers
-	r.Get("/workers", func(w http.ResponseWriter, r *http.Request) {
+	r.Handle("GET /workers", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// return empty array if no workers
 		if len(workerMap) == 0 {
 			httpHelpers.WriteOutput(w, []string{})
@@ -136,11 +136,11 @@ func main() {
 			workerIds = append(workerIds, key)
 		}
 		httpHelpers.WriteOutput(w, workerIds)
-	})
+	}))
 
 	// Get details of a specific worker
-	r.Get("/worker/{id}", func(w http.ResponseWriter, r *http.Request) {
-		workerId := chi.URLParam(r, "id")
+	r.Handle("GET /worker/{id}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		workerId, _ := url.PathUnescape(r.PathValue("id"))
 		info := workerMap[workerId]
 		if info == nil {
 			httpHelpers.WriteError(w, http.StatusNotFound, "Worker not found")
@@ -179,11 +179,11 @@ func main() {
 		}
 
 		httpHelpers.WriteOutput(w, output)
-	})
+	}))
 
 	// Stop a specific worker
-	r.Delete("/worker/{id}", func(w http.ResponseWriter, r *http.Request) {
-		workerId := chi.URLParam(r, "id")
+	r.Handle("DELETE /worker/{id}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		workerId, _ := url.PathUnescape(r.PathValue("id"))
 		info := workerMap[workerId]
 		if info == nil {
 			httpHelpers.WriteError(w, http.StatusNotFound, "Worker not found")
@@ -203,7 +203,7 @@ func main() {
 
 		httpHelpers.WriteTimings(w, httpHelpers.Timings{"stop-time": elapsed})
 		httpHelpers.WriteOutput(w, map[string]any{"msg": "Worker stopped"})
-	})
+	}))
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", cfg.Spawner.Hostname, cfg.Spawner.Port),
