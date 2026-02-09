@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"regexp"
 	"strconv"
+	"strings"
 	"text/template"
 	"time"
 
@@ -58,12 +59,15 @@ func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Du
 	}
 
 	// Adding as a positional argument so startup folder should be last option
-	if baseDirTmpl != "" {
+	if strings.Contains(baseDirTmpl, "{{.home}}") && user.HomeDir == "" {
+		slog.Warn("base_dir_tmpl references {{.home}} but user has no home directory. Omitting starting directory", "username", username)
+	} else if baseDirTmpl != "" {
 		var buf bytes.Buffer
 		tmpl, err := template.New("base_dir_tmpl").Parse(baseDirTmpl)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to parse base_dir_tmpl: %w", err)
 		}
+
 		err = tmpl.Execute(&buf, map[string]string{
 			"user": username,
 			"home": user.HomeDir,
@@ -80,20 +84,6 @@ func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Du
 			slog.Warn("Resolved base directory is not a directory. Omitting it.", "directory", resolvedDir)
 		} else {
 			args = append(args, resolvedDir)
-		}
-	} else {
-		if user.HomeDir != "" {
-			info, err := os.Stat(user.HomeDir)
-			if err != nil {
-				slog.Error("Failed to stat home directory", "username", username, "error", err)
-			}
-			if !info.IsDir() {
-				slog.Warn("User home directory is not a directory", "username", username, "home_dir", user.HomeDir)
-			} else {
-				args = append(args, user.HomeDir)
-			}
-		} else {
-			slog.Warn("User has no home directory", "username", username)
 		}
 	}
 
