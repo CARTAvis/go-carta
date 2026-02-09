@@ -81,7 +81,6 @@ port = 8080
 hostname = ""
 
 # Base directory for user data access
-# If empty, defaults to the user's home directory
 # 
 # References to {{{.user}}} in the string will be replaced with the username of the user
 # and "{{.home}}" will be replaced by the user's home directory
