@@ -361,7 +361,7 @@ func main() {
 	if cfg.Controller.FrontendDir != "" {
 		info, err := os.Stat(cfg.Controller.FrontendDir)
 		if err != nil || !info.IsDir() {
-			slog.Error("Failed to set frontendDir", "error", err, "dirname", cfg.Controller.FrontendDir)
+			slog.Error("Failed to set frontend directory", "error", err, "dirname", cfg.Controller.FrontendDir)
 			os.Exit(1)
 		}
 
@@ -388,7 +388,7 @@ func main() {
 			http.Handle("/pam-login", pamLoginHandler(pamAuth))
 		}
 	} else {
-		slog.Info("No --frontendDir supplied: controller will *not* serve the frontend (only /carta WebSocket).")
+		slog.Warn("No frontend directory specified: controller will *not* serve the frontend (only /carta WebSocket).")
 	}
 
 	cfgHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -397,11 +397,11 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 
 		cfg := map[string]string{
-			"dashboardAddress": "/dashboard", // no dashboard ... causes redirect
-			"apiAddress":       "/api",
+			//"dashboardAddress": "/dashboard", // no dashboard
+			"apiAddress": "/api",
 			//"tokenRefreshAddress":  "/api/auth/refresh",
-			"logoutAddress": "/api/auth/logout",
-			"authPath":      "/api/auth/refresh",
+			//"logoutAddress": "/api/auth/logout",
+			//"authPath":      "/api/auth/refresh",
 		}
 
 		if err := json.NewEncoder(w).Encode(cfg); err != nil {
