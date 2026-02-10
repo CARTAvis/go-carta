@@ -21,7 +21,6 @@ const UserContextKey contextKey = "sessionUser"
 type Session struct {
 	Info           spawnerHelpers.WorkerInfo
 	SpawnerAddress string
-	BaseFolder     string
 	WebSocket      *websocket.Conn
 	User           *auth.User
 	Context        context.Context
@@ -40,12 +39,11 @@ var handlerMap = map[cartaDefinitions.EventType]func(*Session, cartaDefinitions.
 	cartaDefinitions.EventType_EMPTY_EVENT: (*Session).handleStatusMessage,
 }
 
-func NewSession(conn *websocket.Conn, workerAddr string, folder string, user *auth.User) *Session {
+func NewSession(conn *websocket.Conn, workerAddr string, user *auth.User) *Session {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Session{
 		WebSocket:      conn,
 		SpawnerAddress: workerAddr,
-		BaseFolder:     folder,
 		User:           user,
 		Context:        ctx,
 		Cancel:         cancel,

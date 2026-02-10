@@ -2,14 +2,18 @@ package processHelpers
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/user"
 	"regexp"
 	"strconv"
+	"strings"
+	"text/template"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -36,7 +40,12 @@ func parsePortFromLine(line string) (int, bool) {
 // it is listening ("server listening at ..."). The worker is started with
 // -port=0 so the OS selects a free port, and the detected port from the log is
 // returned.
-func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Duration, baseFolder string) (*exec.Cmd, int, error) {
+func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Duration, username string, baseDirTmpl string, topLevelDir string) (*exec.Cmd, int, error) {
+	user, err := user.Lookup(username)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to lookup user %s: %w", username, err)
+	}
+
 	args := []string{"--debug_no_auth"}
 	args = append(args, "--no_frontend")
 	args = append(args, "--no_database")
@@ -45,13 +54,42 @@ func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Du
 	args = append(args, "--exit_timeout", "10")
 	args = append(args, "--initial_timeout", "20")
 	args = append(args, "--idle_timeout", "300")
-	if baseFolder != "" {
-		args = append(args, "--base", baseFolder)
+	if topLevelDir != "" {
+		args = append(args, "--top_level_folder", topLevelDir)
 	}
 
-	slog.Info("Spawning worker process", "workerPath", workerPath, "args", args)
+	// Adding as a positional argument so startup folder should be last option
+	if strings.Contains(baseDirTmpl, "{{.home}}") && user.HomeDir == "" {
+		slog.Warn("base_dir_tmpl references {{.home}} but user has no home directory. Omitting starting directory", "username", username)
+	} else if baseDirTmpl != "" {
+		var buf bytes.Buffer
+		tmpl, err := template.New("base_dir_tmpl").Parse(baseDirTmpl)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to parse base_dir_tmpl: %w", err)
+		}
 
-	cmd := exec.CommandContext(ctx, workerPath, args...)
+		err = tmpl.Execute(&buf, map[string]string{
+			"user": username,
+			"home": user.HomeDir,
+		})
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to execute base_dir_tmpl: %w", err)
+		}
+		resolvedDir := buf.String()
+		slog.Debug("Resolved base directory from template", "template", baseDirTmpl, "resolved", resolvedDir)
+		info, err := os.Stat(resolvedDir)
+		if err != nil {
+			slog.Error("Failed to stat resolved base directory. Omitting it.", "directory", resolvedDir, "error", err)
+		} else if !info.IsDir() {
+			slog.Warn("Resolved base directory is not a directory. Omitting it.", "directory", resolvedDir)
+		} else {
+			args = append(args, resolvedDir)
+		}
+	}
+
+	slog.Info("Spawning worker process", "workerPath", workerPath, "username", username, "args", args)
+
+	cmd := exec.CommandContext(ctx, "sudo", append([]string{"-u", username, workerPath}, args...)...)
 
 	// Capture stdout/stderr so we can watch for the readiness log while still
 	// forwarding output to the parent process' stdio.
