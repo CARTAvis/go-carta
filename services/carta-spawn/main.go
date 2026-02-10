@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
 
@@ -39,17 +39,21 @@ func main() {
 	pflag.Int("port", 8080, "HTTP server port")
 	pflag.String("hostname", "", "Hostname to listen on")
 	pflag.String("worker_exec", "carta_backend", "Path to worker executable")
+	pflag.String("base_dir", "", "Starting directory for data")
+	pflag.String("top_level_dir", "", "Top-level directory for data")
 	pflag.Int("timeout", 5, "Spawn timeout in seconds")
 	pflag.String("override", "", "Override simple config values (string, int, bool) as comma-separated key:value pairs (e.g., spawner.port:9000,log_level:debug)")
 
 	pflag.Parse()
 
 	config.BindFlags(map[string]string{
-		"log_level":   "log_level",
-		"port":        "spawner.port",
-		"hostname":    "spawner.hostname",
-		"worker_exec": "spawner.worker_exec",
-		"timeout":     "spawner.timeout",
+		"log_level":     "log_level",
+		"port":          "spawner.port",
+		"hostname":      "spawner.hostname",
+		"worker_exec":   "spawner.worker_exec",
+		"timeout":       "spawner.timeout",
+		"base_dir":      "spawner.base_dir",
+		"top_level_dir": "spawner.top_level_dir",
 	})
 
 	cfg := config.Load(pflag.Lookup("config").Value.String(), pflag.Lookup("override").Value.String())
@@ -64,15 +68,15 @@ func main() {
 
 	workerMap := make(map[string]*WorkerInfo)
 
-	r := chi.NewRouter()
+	r := http.NewServeMux()
 
 	// Start a new worker
-	r.Post("/", func(w http.ResponseWriter, r *http.Request) {
+	r.Handle("POST /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		startTime := time.Now()
 
-		// parse the optional base folder from the request body
+		// parse the username from the request body
 		var reqBody struct {
-			BaseFolder string `json:"baseFolder"`
+			Username string `json:"username"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
 			slog.Error("Error decoding request body", "error", err)
@@ -80,9 +84,9 @@ func main() {
 			return
 		}
 
-		slog.Info("Process started", "baseFolder", reqBody.BaseFolder)
+		slog.Info("Process started", "username", reqBody.Username)
 
-		cmd, port, err := processHelpers.SpawnWorker(ctx, cfg.Spawner.WorkerExec, cfg.Spawner.Timeout, reqBody.BaseFolder)
+		cmd, port, err := processHelpers.SpawnWorker(ctx, cfg.Spawner.WorkerExec, cfg.Spawner.Timeout, reqBody.Username, cfg.Spawner.BaseDirTmpl, cfg.Spawner.TopLevelDir)
 		spawnerDuration := time.Since(startTime)
 		if err != nil {
 			slog.Error("Error spawning worker on free port", "error", err)
@@ -117,10 +121,10 @@ func main() {
 		}
 
 		httpHelpers.WriteOutput(w, map[string]any{"port": port, "address": workerHostname, "workerId": workerId.String()})
-	})
+	}))
 
 	// List all workers
-	r.Get("/workers", func(w http.ResponseWriter, r *http.Request) {
+	r.Handle("GET /workers", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// return empty array if no workers
 		if len(workerMap) == 0 {
 			httpHelpers.WriteOutput(w, []string{})
@@ -132,11 +136,11 @@ func main() {
 			workerIds = append(workerIds, key)
 		}
 		httpHelpers.WriteOutput(w, workerIds)
-	})
+	}))
 
 	// Get details of a specific worker
-	r.Get("/worker/{id}", func(w http.ResponseWriter, r *http.Request) {
-		workerId := chi.URLParam(r, "id")
+	r.Handle("GET /worker/{id}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		workerId, _ := url.PathUnescape(r.PathValue("id"))
 		info := workerMap[workerId]
 		if info == nil {
 			httpHelpers.WriteError(w, http.StatusNotFound, "Worker not found")
@@ -175,11 +179,11 @@ func main() {
 		}
 
 		httpHelpers.WriteOutput(w, output)
-	})
+	}))
 
 	// Stop a specific worker
-	r.Delete("/worker/{id}", func(w http.ResponseWriter, r *http.Request) {
-		workerId := chi.URLParam(r, "id")
+	r.Handle("DELETE /worker/{id}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		workerId, _ := url.PathUnescape(r.PathValue("id"))
 		info := workerMap[workerId]
 		if info == nil {
 			httpHelpers.WriteError(w, http.StatusNotFound, "Worker not found")
@@ -199,7 +203,7 @@ func main() {
 
 		httpHelpers.WriteTimings(w, httpHelpers.Timings{"stop-time": elapsed})
 		httpHelpers.WriteOutput(w, map[string]any{"msg": "Worker stopped"})
-	})
+	}))
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", cfg.Spawner.Hostname, cfg.Spawner.Port),
