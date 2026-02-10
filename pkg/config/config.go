@@ -2,7 +2,6 @@
 package config
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -121,9 +120,8 @@ func Load(configPath string, overrideStr string) *Config {
 
 	err := viper.ReadInConfig()
 	if err != nil {
-		// Ignore file not found errors (config is optional)
-		var configFileNotFoundError viper.ConfigFileNotFoundError
-		if !errors.As(err, &configFileNotFoundError) {
+		// Ignore failure to read default config (config is optional)
+		if configPath != "" {
 			slog.Error("Failed to read config file", "error", err, "config_file", viper.ConfigFileUsed())
 			os.Exit(1)
 		}
