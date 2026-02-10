@@ -31,7 +31,6 @@ import (
 
 var (
 	runtimeSpawnerAddress string
-	runtimeBaseFolder     string
 	pamAuth               pamwrap.Authenticator
 )
 
@@ -94,7 +93,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	user, _ := r.Context().Value(session.UserContextKey).(*auth.User)
 
-	s := session.NewSession(c, runtimeSpawnerAddress, runtimeBaseFolder, user)
+	s := session.NewSession(c, runtimeSpawnerAddress, user)
 	slog.Info("Created new session", "user", user)
 
 	// Send messages back to client through websocket
@@ -265,7 +264,6 @@ func main() {
 	pflag.Int("port", 8081, "TCP server port")
 	pflag.String("hostname", "", "Hostname to listen on")
 	pflag.String("spawner_address", "", "Address of the process spawner")
-	pflag.String("base_folder", "", "Base folder for data")
 	pflag.String("frontend_dir", "", "Directory with carta_frontend")
 	pflag.String("auth_mode", "none", "Authentication mode: none|pam|oidc|both")
 	pflag.String("override", "", "Override simple config values (string, int, bool) as comma-separated key:value pairs (e.g., controller.port:9000,log_level:debug)")
@@ -284,7 +282,6 @@ func main() {
 		"port":            "controller.port",
 		"hostname":        "controller.hostname",
 		"spawner_address": "controller.spawner_address",
-		"base_folder":     "controller.base_folder",
 		"frontend_dir":    "controller.frontend_dir",
 		"auth_mode":       "controller.auth_mode",
 		"db_conn_string":  "controller.db_conn_string",
@@ -307,8 +304,6 @@ func main() {
 	if runtimeSpawnerAddress == "" {
 		runtimeSpawnerAddress = fmt.Sprintf("http://%s:%d", cfg.Spawner.Hostname, cfg.Spawner.Port)
 	}
-
-	runtimeBaseFolder = cfg.Controller.BaseFolder
 
 	var authenticator auth.Authenticator
 
@@ -345,16 +340,6 @@ func main() {
 	default:
 		slog.Error("Unknown config option", "authMode", cfg.Controller.AuthMode)
 		os.Exit(1)
-	}
-
-	// Default baseFolder to $HOME if unset
-	if len(strings.TrimSpace(cfg.Controller.BaseFolder)) == 0 {
-		dirname, err := os.UserHomeDir()
-		if err != nil {
-			dirname = "/"
-		}
-		cfg.Controller.BaseFolder = dirname
-		slog.Debug("Using default base folder", "dirname", dirname)
 	}
 
 	if cfg.Controller.DBConnectionString != "" {
