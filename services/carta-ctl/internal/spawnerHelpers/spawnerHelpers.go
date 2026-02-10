@@ -100,9 +100,9 @@ func GetWorkerStatus(workerId string, spawnerAddress string) (WorkerStatus, erro
 	return WorkerStatus{}, errors.New("failed to get worker status")
 }
 
-func RequestWorkerStartup(spawnerAddress string, baseFolder string) (WorkerInfo, error) {
-	// create a request body with the base folder
-	requestBody, err := json.Marshal(map[string]string{"baseFolder": baseFolder})
+func RequestWorkerStartup(spawnerAddress string, username string) (WorkerInfo, error) {
+	// create a request body with the username
+	requestBody, err := json.Marshal(map[string]string{"username": username})
 	if err != nil {
 		return WorkerInfo{}, err
 	}

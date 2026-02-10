@@ -38,10 +38,6 @@ frontend_dir = ""
 # Address of the spawner service. If this is empty, the controller will determine the address from the spawner hostname and port
 spawner_address = "http://localhost:8080"
 
-# Base folder for user data access
-# If empty, defaults to $HOME
-base_folder = ""
-
 # ----------------------------------------------------------------------------
 # PAM Authentication Configuration (when auth_mode = "pam" or "both")
 # ----------------------------------------------------------------------------
@@ -83,3 +79,12 @@ port = 8080
 
 # Hostname to bind to. If this is empty, all interfaces will be used
 hostname = ""
+
+# Base directory for user data access
+# 
+# References to {{{.user}}} in the string will be replaced with the username of the user
+# and "{{.home}}" will be replaced by the user's home directory
+base_dir_tmpl = "{{.home}}"
+
+# Top level directory for user data access
+top_level_dir = "/"

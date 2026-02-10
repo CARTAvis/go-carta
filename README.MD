@@ -120,3 +120,10 @@ A common initial use case for `go-carta` is as a replacement for the old CARTA c
 ```bash
 ./build/carta-spawn --worker_exec=carta_backend
 ```
+
+The spawner will attempt to launch the worker executable using `sudo` and must be given the ability to launch instances of the executable password-lessly for permitted users.  This is likely to require [modifying the sudoers configuration](https://www.sudo.ws/man/1.9.0/sudoers.man.html).  For example the sudoers rule below will allow the user `carta` to launch instances of the backend for any user in the `carta-users` group.
+
+```
+# carta user can run the carta_backend command as any user in the carta-users group without entering password
+carta ALL=(%carta-users) NOPASSWD:SETENV: /usr/bin/carta_backend
+```
