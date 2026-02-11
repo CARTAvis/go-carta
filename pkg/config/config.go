@@ -43,6 +43,7 @@ type ControllerConfig struct {
 	SpawnerAddress     string     `mapstructure:"spawner_address"`
 	AuthMode           AuthMode   `mapstructure:"auth_mode"`
 	DBConnectionString string     `mapstructure:"db_conn_string"`
+	ApiPrefix		   string     `mapstructure:"api_prefix"`
 }
 
 type SpawnerConfig struct {
@@ -77,6 +78,8 @@ func setControllerDefaults(v *viper.Viper) {
 	v.SetDefault("controller.oidc.client_secret", "")
 	v.SetDefault("controller.oidc.redirect_url", "")
 	v.SetDefault("controller.db_conn_string", "")
+	v.SetDefault("controller.api_prefix", "/api")
+
 }
 
 func setSpawnerDefaults(v *viper.Viper) {
