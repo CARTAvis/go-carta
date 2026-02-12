@@ -43,6 +43,7 @@ type ControllerConfig struct {
 	SpawnerAddress     string     `mapstructure:"spawner_address"`
 	AuthMode           AuthMode   `mapstructure:"auth_mode"`
 	DBConnectionString string     `mapstructure:"db_conn_string"`
+	SessionSecret      string     `mapstructure:"session_secret"`
 }
 
 type SpawnerConfig struct {

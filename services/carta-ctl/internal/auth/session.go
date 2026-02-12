@@ -5,18 +5,28 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
-	"log"
+	"log/slog"
+	"os"
 	"strings"
 	"time"
 )
 
-// TODO: in production, load this from config or env, not hard-coded.
-var sessionSecret = []byte("CHANGE-ME-TO-A-RANDOM-SECRET")
+var sessionSecret []byte
+
+// SetSessionSecret initializes the session secret used for signing tokens. It must be called before other token functions.
+func SetSessionSecret(secret string) {
+	if secret == "" {
+		slog.Error("Session secret cannot be empty.")
+		os.Exit(-1)
+	}
+	slog.Info("Setting session secret", "length", len(secret))
+	sessionSecret = []byte(secret)
+}
 
 // GenerateSessionToken creates a signed token for a username with an expiry time.
 func GenerateSessionToken(username string, expiry time.Time) (string, error) {
 	payload := fmt.Sprintf("%s|%d", username, expiry.Unix())
-	log.Printf("Generating session token with payload: %s", payload)
+	slog.Info("Generating session token", "payload", payload)
 	mac := hmac.New(sha256.New, sessionSecret)
 	mac.Write([]byte(payload))
 	sig := mac.Sum(nil)
@@ -47,7 +57,7 @@ func VerifySessionToken(token string) (string, error) {
 
 	payload := username + "|" + expiryStr
 
-	log.Printf("Verifying session token with payload: %s", payload)
+	slog.Info("Verifying session token with payload", "payload", payload)
 	mac := hmac.New(sha256.New, sessionSecret)
 	mac.Write([]byte(payload))
 	expected := mac.Sum(nil)

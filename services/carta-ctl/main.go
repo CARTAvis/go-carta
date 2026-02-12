@@ -292,6 +292,8 @@ func main() {
 	slog.Info("Cfg auth_mode", "authMode", cfg.Controller.AuthMode)
 	slog.Info("Cfg auth_mode", "cfg.Controller.AuthMode", cfg.Controller.AuthMode)
 
+	auth.SetSessionSecret(cfg.Controller.SessionSecret)
+
 	// Update the logger to use the configured log level
 	logger = helpers.NewLogger("carta-ctl", cfg.LogLevel)
 	slog.SetDefault(logger)

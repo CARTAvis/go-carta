@@ -38,6 +38,9 @@ frontend_dir = ""
 # Address of the spawner service. If this is empty, the controller will determine the address from the spawner hostname and port
 spawner_address = "http://localhost:8080"
 
+# Session secret
+# session_secret = "CHANGE-ME-TO-A-RANDOM-SECRET"
+
 # ----------------------------------------------------------------------------
 # PAM Authentication Configuration (when auth_mode = "pam" or "both")
 # ----------------------------------------------------------------------------
