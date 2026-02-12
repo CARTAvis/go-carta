@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -343,7 +344,12 @@ func main() {
 	}
 
 	if cfg.Controller.DBConnectionString != "" {
-		slog.Debug("Database connection string provided", "db_conn_string", cfg.Controller.DBConnectionString)
+		urlPassRE := regexp.MustCompile(`(postgres(?:ql)?://[^:]+:)([^@]+)(@)`)
+		kvPassRE := regexp.MustCompile(`(?i)\bpassword\s*=\s*[^ ]+`)
+		sanitizedString := urlPassRE.ReplaceAllString(cfg.Controller.DBConnectionString, `$1********$3`)
+		sanitizedString = kvPassRE.ReplaceAllString(sanitizedString, "password=********")
+
+		slog.Debug("Database connection string provided", "db_conn_string", sanitizedString)
 		db := database.DbConfig{
 			ConnString: cfg.Controller.DBConnectionString,
 		}
