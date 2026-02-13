@@ -19,8 +19,17 @@ func SetSessionSecret(secret string) {
 		slog.Error("Session secret cannot be empty.")
 		os.Exit(-1)
 	}
-	slog.Info("Setting session secret", "length", len(secret))
-	sessionSecret = []byte(secret)
+
+	sessionSecret, err := base64.StdEncoding.DecodeString(secret)
+	if err != nil {
+		slog.Error("Failed to decode session secret from base64", "error", err)
+		os.Exit(-1)
+	}
+	if len(sessionSecret) < 32 {
+		slog.Error("Session secret is too short, must be at least 32 bytes after decoding")
+		os.Exit(-1)
+	}
+	slog.Info("Setting session secret", "length", len(sessionSecret))
 }
 
 // GenerateSessionToken creates a signed token for a username with an expiry time.
