@@ -38,6 +38,11 @@ frontend_dir = ""
 # Address of the spawner service. If this is empty, the controller will determine the address from the spawner hostname and port
 spawner_address = "http://localhost:8080"
 
+# If exposing the controller to users other than at the top level of a domain the controller must tell the frontend where to find interfaces
+# - If the controller is accessed at http://mydomain.tld/ the default should suffice
+# - If the controller is accessed at, e.g., http://mydomain.tld/carta/ this should then be set to "/carta/api"
+api_prefix = "/api"
+
 # ----------------------------------------------------------------------------
 # PAM Authentication Configuration (when auth_mode = "pam" or "both")
 # ----------------------------------------------------------------------------
