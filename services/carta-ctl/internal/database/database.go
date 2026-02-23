@@ -118,7 +118,7 @@ func (h *DbConfig) InitDb() {
 	// Initialize DB connection
 	db, err := sqlx.Connect("postgres", h.ConnString)
 	if err != nil {
-		slog.Error("Error connecting to database", "err", err)
+		slog.Error("Error connecting to database")
 		os.Exit(-1)
 	}
 	h.db = db
