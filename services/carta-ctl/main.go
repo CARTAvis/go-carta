@@ -34,6 +34,40 @@ var (
 	pamAuth               pamwrap.Authenticator
 )
 
+func refreshHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	c, err := r.Cookie("refresh_token")
+	if err != nil {
+		http.Error(w, "Missing refresh token", http.StatusUnauthorized)
+		return
+	}
+
+	claims, err := auth.VerifyToken(c.Value)
+	if err != nil || claims.Type != auth.TokenTypeRefresh {
+		http.Error(w, "Invalid refresh token", http.StatusUnauthorized)
+		return
+	}
+
+	sessionToken, err := auth.GenerateToken(claims.Username, auth.TokenTypeAccess)
+	if err != nil {
+		slog.Error("Failed to generate access token", "error", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"access_token": sessionToken,
+		"token_type":   "bearer",
+		"expires_in":   auth.GetAccessTokenAgeSeconds(),
+	})
+}
+
 var upgrader = websocket.Upgrader{
 	// Ignore Origin header
 	CheckOrigin: func(r *http.Request) bool {
@@ -82,16 +116,51 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filepath.Join(h.root, "index.html"))
 }
 
+func accessTokenFromRequest(r *http.Request) string {
+	authHeader := r.Header.Get("Authorization")
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		return strings.TrimPrefix(authHeader, "Bearer ")
+	}
+
+	return r.URL.Query().Get("token")
+}
+
+func authorizeAccessToken(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
+	tokenString := accessTokenFromRequest(r)
+	if tokenString == "" {
+		http.Error(w, "Missing or invalid access token", http.StatusUnauthorized)
+		return nil, false
+	}
+
+	claims, err := auth.VerifyToken(tokenString)
+	if err != nil || claims.Type != auth.TokenTypeAccess {
+		http.Error(w, "Invalid access token", http.StatusUnauthorized)
+		return nil, false
+	}
+
+	user := &auth.User{
+		Username: claims.Username,
+		Source:   auth.SourcePAM,
+		Claims:   map[string]any{},
+	}
+
+	return user, true
+}
+
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Handling WebSocket connection", "remoteAddr", r.RemoteAddr)
+
+	user, ok := authorizeAccessToken(w, r)
+	if !ok {
+		return
+	}
+
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("Problem with HTTP upgrade", "error", err)
 		return
 	}
 	defer helpers.CloseOrLog(c)
-
-	user, _ := r.Context().Value(session.UserContextKey).(*auth.User)
 
 	s := session.NewSession(c, runtimeSpawnerAddress, user)
 	slog.Info("Created new session", "user", user)
@@ -138,21 +207,26 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	slog.Info("Client disconnected")
 }
 
-func withAuth(a auth.Authenticator, next http.Handler) http.Handler {
+func withAccessToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, err := a.AuthenticateHTTP(w, r)
-		if err != nil {
-			// Expected when we just redirected to /oidc/login
-			if strings.Contains(err.Error(), "no OIDC session") {
-				// optional: log at debug level instead
-				slog.Debug("Redirecting to OIDC login")
-				return
-			}
-			slog.Error("Auth failed", "error", err)
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+			http.Error(w, "Missing or invalid access token", http.StatusUnauthorized)
 			return
 		}
 
-		// Attach user to context
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		claims, err := auth.VerifyToken(tokenString)
+		if err != nil || claims.Type != auth.TokenTypeAccess {
+			http.Error(w, "Invalid access token", http.StatusUnauthorized)
+			return
+		}
+
+		user := &auth.User{
+			Username: claims.Username,
+			Source:   auth.SourcePAM, // or determine from claims
+			Claims:   map[string]any{},
+		}
 		ctx := context.WithValue(r.Context(), session.UserContextKey, user)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -196,7 +270,9 @@ func pamLoginHandler(p pamwrap.Authenticator) http.Handler {
 
 		case http.MethodPost:
 			if err := r.ParseForm(); err != nil {
-				http.Error(w, "Bad form", http.StatusBadRequest)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "Bad form"})
 				return
 			}
 
@@ -204,29 +280,23 @@ func pamLoginHandler(p pamwrap.Authenticator) http.Handler {
 			password := r.Form.Get("password")
 
 			if username == "" || password == "" {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
-				_ = pamLoginTmpl.Execute(w, pageData{
-					Title:   "CARTA Login",
-					Heading: "CARTA Login (PAM)",
-					Error:   "Missing username or password",
-				})
+				json.NewEncoder(w).Encode(map[string]string{"error": "Missing username or password"})
 				return
 			}
 
 			user, err := p.AuthenticateCredentials(r.Context(), username, password)
 			if err != nil {
 				slog.Error("PAM login failed", "username", username, "error", err)
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
-				_ = pamLoginTmpl.Execute(w, pageData{
-					Title:   "CARTA Login",
-					Heading: "CARTA Login (PAM)",
-					Error:   "Invalid credentials",
-				})
+				json.NewEncoder(w).Encode(map[string]string{"error": "Invalid credentials"})
 				return
 			}
 			slog.Info("About to set PAM session cookie", "username", user.Username)
 
-			if err := pamwrap.SetSessionCookie(w, user.Username); err != nil {
+			if err := auth.SetRefreshTokenCookie(w, user.Username); err != nil {
 				slog.Error("Failed to set PAM session cookie", "username", user.Username, "error", err)
 				http.Error(w, "Session error", http.StatusInternalServerError)
 				return
@@ -289,6 +359,11 @@ func main() {
 
 	cfg := config.Load(pflag.Lookup("config").Value.String(), pflag.Lookup("override").Value.String())
 
+	if err := auth.InitJWT(cfg.Controller.TokenConfig); err != nil {
+		slog.Error("Failed to initialize JWT", "error", err)
+		os.Exit(1)
+	}
+
 	slog.Info("Cfg auth_mode", "authMode", cfg.Controller.AuthMode)
 	slog.Info("Cfg auth_mode", "cfg.Controller.AuthMode", cfg.Controller.AuthMode)
 
@@ -305,13 +380,11 @@ func main() {
 		runtimeSpawnerAddress = fmt.Sprintf("http://%s:%d", cfg.Spawner.Hostname, cfg.Spawner.Port)
 	}
 
-	var authenticator auth.Authenticator
-
 	slog.Debug("Configuring auth", "authMode", cfg.Controller.AuthMode)
 
 	switch cfg.Controller.AuthMode {
 	case config.AuthNone:
-		authenticator = auth.NoopAuthenticator{}
+		// No authentication required
 	case config.AuthPAM:
 		p, err := pamwrap.New(cfg.Controller.PAM)
 		if err != nil {
@@ -319,12 +392,10 @@ func main() {
 			os.Exit(1)
 		}
 		pamAuth = p
-		authenticator = p
 
 	case config.AuthOIDC:
 		o := authoidc.New(cfg.Controller.OIDC)
 		oidcAuth = o
-		authenticator = o
 
 	case config.AuthBoth:
 		p, err := pamwrap.New(cfg.Controller.PAM)
@@ -333,10 +404,6 @@ func main() {
 			os.Exit(1)
 		}
 		pamAuth = p
-		authenticator = auth.Multi(
-			p,
-			authoidc.New(cfg.Controller.OIDC),
-		)
 	default:
 		slog.Error("Unknown config option", "authMode", cfg.Controller.AuthMode)
 		os.Exit(1)
@@ -351,7 +418,7 @@ func main() {
 		http.Handle(
 			"/api/database/",
 			noCache(
-				withAuth(authenticator,
+				withAccessToken(
 					http.StripPrefix("/api/database", http.Handler(db.Router())))))
 	} else {
 		slog.Debug("Defaulting to backend's filesystem-based state-saving")
@@ -377,11 +444,11 @@ func main() {
 		//  - /           -> index.html
 		//  - /static/... -> real files
 		//  - /whatever   -> index.html (for SPA routes)
-		// Wrap root with the currently-selected authenticator (PAM, OIDC, both, or none).
-		http.Handle("/", withAuth(authenticator, spaHandler{
+		// The SPA itself is public; API and WebSocket upgrade paths require access tokens.
+		http.Handle("/", spaHandler{
 			root: cfg.Controller.FrontendDir,
 			fs:   fs,
-		}))
+		})
 
 		// Expose the PAM login page only when PAM is enabled.
 		if pamAuth != nil && (cfg.Controller.AuthMode == config.AuthPAM || cfg.Controller.AuthMode == config.AuthBoth) {
@@ -391,17 +458,33 @@ func main() {
 		slog.Warn("No frontend directory specified: controller will *not* serve the frontend (only /carta WebSocket).")
 	}
 
+	// Token refresh endpoint remains open to refresh cookies only.
+	http.HandleFunc("/api/auth/refresh", refreshHandler)
+
+	// Require access tokens on all other /api/ requests.
+	http.Handle("/api/", withAccessToken(http.NotFoundHandler()))
+
 	cfgHandler := func(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 
-		cfg := map[string]string{
-			//"dashboardAddress": "/dashboard", // no dashboard
-			"apiAddress": cfg.Controller.ApiPrefix,
-			//"tokenRefreshAddress":  "/api/auth/refresh",
-			//"logoutAddress": "/api/auth/logout",
-			//"authPath":      "/api/auth/refresh",
+		loginAddr := "/login" // default
+		switch cfg.Controller.AuthMode {
+		case config.AuthPAM:
+			loginAddr = "/pam-login"
+		case config.AuthOIDC:
+			loginAddr = "/oidc/login"
+		case config.AuthBoth:
+			// For both, could have a combined login page, but for now default to /login
+			loginAddr = "/login"
+		}
+
+		cfg := map[string]interface{}{
+			"apiAddress":          cfg.Controller.ApiPrefix,
+			"tokenRefreshAddress": "/api/auth/refresh",
+			"loginAddress":        loginAddr,
+			"serviceRestartable":  true,
 		}
 
 		if err := json.NewEncoder(w).Encode(cfg); err != nil {

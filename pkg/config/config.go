@@ -34,16 +34,25 @@ type PAMConfig struct {
 	ServiceName string `mapstructure:"service_name"` // e.g. "login" or "carta"
 }
 
+type TokenConfig struct {
+	PrivateKeyLocation string `mapstructure:"private_key_location"`
+	PublicKeyLocation  string `mapstructure:"public_key_location"`
+	Issuer             string `mapstructure:"issuer"`
+	AccessTokenAge     string `mapstructure:"access_token_age"`
+	RefreshTokenAge    string `mapstructure:"refresh_token_age"`
+}
+
 type ControllerConfig struct {
-	OIDC               OIDCConfig `mapstructure:"oidc"`
-	PAM                PAMConfig  `mapstructure:"pam"`
-	Port               int        `mapstructure:"port"`
-	Hostname           string     `mapstructure:"hostname"`
-	FrontendDir        string     `mapstructure:"frontend_dir"`
-	SpawnerAddress     string     `mapstructure:"spawner_address"`
-	AuthMode           AuthMode   `mapstructure:"auth_mode"`
-	DBConnectionString string     `mapstructure:"db_conn_string"`
-	ApiPrefix          string     `mapstructure:"api_prefix"`
+	OIDC               OIDCConfig  `mapstructure:"oidc"`
+	PAM                PAMConfig   `mapstructure:"pam"`
+	TokenConfig        TokenConfig `mapstructure:"token_config"`
+	Port               int         `mapstructure:"port"`
+	Hostname           string      `mapstructure:"hostname"`
+	FrontendDir        string      `mapstructure:"frontend_dir"`
+	SpawnerAddress     string      `mapstructure:"spawner_address"`
+	AuthMode           AuthMode    `mapstructure:"auth_mode"`
+	DBConnectionString string      `mapstructure:"db_conn_string"`
+	ApiPrefix          string      `mapstructure:"api_prefix"`
 }
 
 type SpawnerConfig struct {
@@ -79,6 +88,12 @@ func setControllerDefaults(v *viper.Viper) {
 	v.SetDefault("controller.oidc.redirect_url", "")
 	v.SetDefault("controller.db_conn_string", "")
 	v.SetDefault("controller.api_prefix", "/api")
+
+	v.SetDefault("controller.token_config.private_key_location", "/etc/carta/carta_private.pem")
+	v.SetDefault("controller.token_config.public_key_location", "/etc/carta/carta_public.pem")
+	v.SetDefault("controller.token_config.issuer", "carta-ctl")
+	v.SetDefault("controller.token_config.access_token_age", "10m")
+	v.SetDefault("controller.token_config.refresh_token_age", "24h")
 
 }
 
