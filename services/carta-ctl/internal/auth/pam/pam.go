@@ -5,8 +5,6 @@ package pam
 
 import (
 	"context"
-	"fmt"
-	"net/http"
 
 	"github.com/msteinert/pam"
 
@@ -49,9 +47,4 @@ func (p *PAMAuthenticator) AuthenticateCredentials(ctx context.Context, username
 		Source:   auth.SourcePAM,
 		Claims:   map[string]any{},
 	}, nil
-}
-
-func (p *PAMAuthenticator) AuthenticateHTTP(w http.ResponseWriter, r *http.Request) (*auth.User, error) {
-	http.Redirect(w, r, "/pam-login", http.StatusFound)
-	return nil, fmt.Errorf("PAM authentication required")
 }
