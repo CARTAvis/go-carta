@@ -1,5 +1,5 @@
-//go:build linux
-// +build linux
+//go:build pam
+// +build pam
 
 package pam
 
