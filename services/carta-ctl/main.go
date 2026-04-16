@@ -394,7 +394,11 @@ func main() {
 		pamAuth = p
 
 	case config.AuthOIDC:
-		o := authoidc.New(cfg.Controller.OIDC)
+		o, err := authoidc.New(cfg.Controller.OIDC)
+		if err != nil {
+			slog.Error("Failed to initialize OIDC authentication", "error", err)
+			os.Exit(1)
+		}
 		oidcAuth = o
 
 	case config.AuthBoth:
@@ -404,6 +408,13 @@ func main() {
 			os.Exit(1)
 		}
 		pamAuth = p
+
+		o, err := authoidc.New(cfg.Controller.OIDC)
+		if err != nil {
+			slog.Error("Auth mode 'both' requires OIDC, but failed to initialize OIDC", "error", err)
+			os.Exit(1)
+		}
+		oidcAuth = o
 	default:
 		slog.Error("Unknown config option", "authMode", cfg.Controller.AuthMode)
 		os.Exit(1)

@@ -22,8 +22,8 @@ const (
 )
 
 type OIDCConfig struct {
-	IssuerURL     string   `mapstrucutre:"issuer_url"`
-	ClientID      string   `mapstrucutre:"client_id"`
+	IssuerURL     string   `mapstructure:"issuer_url"`
+	ClientID      string   `mapstructure:"client_id"`
 	ClientSecret  string   `mapstructure:"client_secret"`
 	RedirectURL   string   `mapstructure:"redirect_url"`
 	AllowedAud    []string `mapstructure:"allowed_aud"`
