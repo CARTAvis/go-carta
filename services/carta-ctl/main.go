@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -242,6 +243,22 @@ func noCache(next http.Handler) http.Handler {
 	})
 }
 
+func logoutHandler(loginAddr string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "refresh_token",
+			Value:    "",
+			Path:     "/api/auth/refresh",
+			MaxAge:   -1,
+			Expires:  time.Unix(0, 0),
+			HttpOnly: true,
+			Secure:   false,
+			SameSite: http.SameSiteLaxMode,
+		})
+		http.Redirect(w, r, loginAddr, http.StatusFound)
+	}
+}
+
 //go:embed templates/*.html
 var templates embed.FS
 var pamLoginTmpl *template.Template
@@ -420,6 +437,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	authLoginAddress := "/login"
+	authLogoutAddress := ""
+	switch cfg.Controller.AuthMode {
+	case config.AuthPAM:
+		authLoginAddress = "/pam-login"
+		authLogoutAddress = "/logout"
+	case config.AuthOIDC:
+		authLoginAddress = "/oidc/login"
+		authLogoutAddress = "/logout"
+	case config.AuthBoth:
+		// For both, could have a combined login page, but for now default to /login
+		authLoginAddress = "/login"
+		authLogoutAddress = "/logout"
+	}
+
 	if cfg.Controller.DBConnectionString != "" {
 		slog.Debug("Database connection string provided", "db_conn_string", cfg.Controller.DBConnectionString)
 		db := database.DbConfig{
@@ -471,6 +503,8 @@ func main() {
 
 	// Token refresh endpoint remains open to refresh cookies only.
 	http.HandleFunc("/api/auth/refresh", refreshHandler)
+	// Logout endpoint clears the refresh cookie and redirects to login.
+	http.HandleFunc("/logout", logoutHandler(authLoginAddress))
 
 	// Require access tokens on all other /api/ requests.
 	http.Handle("/api/", withAccessToken(http.NotFoundHandler()))
@@ -480,22 +514,14 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 
-		loginAddr := "/login" // default
-		switch cfg.Controller.AuthMode {
-		case config.AuthPAM:
-			loginAddr = "/pam-login"
-		case config.AuthOIDC:
-			loginAddr = "/oidc/login"
-		case config.AuthBoth:
-			// For both, could have a combined login page, but for now default to /login
-			loginAddr = "/login"
-		}
-
 		cfg := map[string]interface{}{
 			"apiAddress":          cfg.Controller.ApiPrefix,
 			"tokenRefreshAddress": "/api/auth/refresh",
-			"loginAddress":        loginAddr,
+			"loginAddress":        authLoginAddress,
 			"serviceRestartable":  true,
+		}
+		if authLogoutAddress != "" {
+			cfg["logoutAddress"] = authLogoutAddress
 		}
 
 		if err := json.NewEncoder(w).Encode(cfg); err != nil {
