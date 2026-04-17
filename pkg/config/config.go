@@ -26,6 +26,7 @@ type OIDCConfig struct {
 	ClientID      string   `mapstructure:"client_id"`
 	ClientSecret  string   `mapstructure:"client_secret"`
 	RedirectURL   string   `mapstructure:"redirect_url"`
+	AppURL        string   `mapstructure:"app_url"`
 	AllowedAud    []string `mapstructure:"allowed_aud"`
 	AllowedGroups []string `mapstructure:"allowed_groups"`
 }
@@ -86,6 +87,7 @@ func setControllerDefaults(v *viper.Viper) {
 	v.SetDefault("controller.oidc.client_id", "")
 	v.SetDefault("controller.oidc.client_secret", "")
 	v.SetDefault("controller.oidc.redirect_url", "")
+	v.SetDefault("controller.oidc.app_url", "")
 	v.SetDefault("controller.db_conn_string", "")
 	v.SetDefault("controller.api_prefix", "/api")
 

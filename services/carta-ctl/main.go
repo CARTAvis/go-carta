@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -243,8 +244,9 @@ func noCache(next http.Handler) http.Handler {
 	})
 }
 
-func logoutHandler(loginAddr string) http.HandlerFunc {
+func logoutHandler(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Clear the refresh token cookie
 		http.SetCookie(w, &http.Cookie{
 			Name:     "refresh_token",
 			Value:    "",
@@ -255,8 +257,58 @@ func logoutHandler(loginAddr string) http.HandlerFunc {
 			Secure:   false,
 			SameSite: http.SameSiteLaxMode,
 		})
+
+		// Clear any stored OIDC logout cookies
+		for _, name := range []string{"oidc_id_token", "oidc_logout_endpoint"} {
+			http.SetCookie(w, &http.Cookie{
+				Name:     name,
+				Value:    "",
+				Path:     "/logout",
+				MaxAge:   -1,
+				Expires:  time.Unix(0, 0),
+				HttpOnly: true,
+				Secure:   false,
+				SameSite: http.SameSiteLaxMode,
+			})
+		}
+
+		// If OIDC ID token and logout endpoint cookies exist, redirect through provider's logout endpoint
+		idTokenCookie, idTokenErr := r.Cookie("oidc_id_token")
+		logoutEndpointCookie, endpointErr := r.Cookie("oidc_logout_endpoint")
+		if idTokenErr == nil && endpointErr == nil && idTokenCookie.Value != "" && logoutEndpointCookie.Value != "" {
+			logoutURL := buildOIDCLogoutURL(logoutEndpointCookie.Value, idTokenCookie.Value, cfg.Controller.OIDC.AppURL)
+			http.Redirect(w, r, logoutURL, http.StatusFound)
+			return
+		}
+
+		// Default: redirect to login page
+		loginAddr := "/login"
+		switch cfg.Controller.AuthMode {
+		case config.AuthPAM:
+			loginAddr = "/pam-login"
+		case config.AuthOIDC:
+			loginAddr = "/oidc/login"
+		case config.AuthBoth:
+			loginAddr = "/login"
+		}
 		http.Redirect(w, r, loginAddr, http.StatusFound)
 	}
+}
+
+func buildOIDCLogoutURL(logoutEndpoint, idTokenHint, postLogoutRedirectURI string) string {
+	u, err := url.Parse(logoutEndpoint)
+	if err != nil {
+		return logoutEndpoint
+	}
+	q := u.Query()
+	q.Set("id_token_hint", idTokenHint)
+	if postLogoutRedirectURI != "" {
+		q.Set("post_logout_redirect_uri", postLogoutRedirectURI)
+	} else {
+		slog.Warn("OIDC app_url not configured, logout will not redirect to login page after logout")
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 //go:embed templates/*.html
@@ -438,18 +490,14 @@ func main() {
 	}
 
 	authLoginAddress := "/login"
-	authLogoutAddress := ""
 	switch cfg.Controller.AuthMode {
 	case config.AuthPAM:
 		authLoginAddress = "/pam-login"
-		authLogoutAddress = "/logout"
 	case config.AuthOIDC:
 		authLoginAddress = "/oidc/login"
-		authLogoutAddress = "/logout"
 	case config.AuthBoth:
 		// For both, could have a combined login page, but for now default to /login
 		authLoginAddress = "/login"
-		authLogoutAddress = "/logout"
 	}
 
 	if cfg.Controller.DBConnectionString != "" {
@@ -504,7 +552,7 @@ func main() {
 	// Token refresh endpoint remains open to refresh cookies only.
 	http.HandleFunc("/api/auth/refresh", refreshHandler)
 	// Logout endpoint clears the refresh cookie and redirects to login.
-	http.HandleFunc("/logout", logoutHandler(authLoginAddress))
+	http.HandleFunc("/logout", logoutHandler(cfg))
 
 	// Require access tokens on all other /api/ requests.
 	http.Handle("/api/", withAccessToken(http.NotFoundHandler()))
@@ -514,17 +562,17 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 
-		cfg := map[string]interface{}{
+		configResponse := map[string]interface{}{
 			"apiAddress":          cfg.Controller.ApiPrefix,
 			"tokenRefreshAddress": "/api/auth/refresh",
 			"loginAddress":        authLoginAddress,
 			"serviceRestartable":  true,
 		}
-		if authLogoutAddress != "" {
-			cfg["logoutAddress"] = authLogoutAddress
+		if cfg.Controller.AuthMode != config.AuthNone {
+			configResponse["logoutAddress"] = "/logout"
 		}
 
-		if err := json.NewEncoder(w).Encode(cfg); err != nil {
+		if err := json.NewEncoder(w).Encode(configResponse); err != nil {
 			slog.Error("Error encoding config", "err", err)
 		}
 	}

@@ -261,6 +261,32 @@ func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	logoutEndpoint, err := o.EndSessionEndpoint(ctx)
+	if err != nil {
+		slog.Error("OIDC: failed to discover end_session_endpoint", "error", err)
+		http.Error(w, "OIDC endpoint error", http.StatusInternalServerError)
+		return
+	}
+
+	// Store raw ID token and logout endpoint cookies for logout flow
+	// Restrict both cookies to /logout path for security
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oidc_id_token",
+		Value:    rawIDToken,
+		Path:     "/logout",
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oidc_logout_endpoint",
+		Value:    logoutEndpoint,
+		Path:     "/logout",
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+	})
+
 	slog.Info("OIDC: login successful", "username", user.Username)
 
 	http.Redirect(w, r, "/", http.StatusFound)
@@ -308,4 +334,20 @@ func (o *OIDCAuthenticator) verifyRawToken(ctx context.Context, raw string) (*au
 	}
 
 	return user, nil
+}
+
+// GetLogoutURL constructs the OIDC provider's logout endpoint URL from well-known config.
+// It retrieves the end_session_endpoint from the provider's discovery metadata.
+func (o *OIDCAuthenticator) EndSessionEndpoint(ctx context.Context) (string, error) {
+	var discovery struct {
+		EndSessionEndpoint string `json:"end_session_endpoint"`
+	}
+
+	if err := o.provider.Claims(&discovery); err != nil {
+		return "", fmt.Errorf("failed to retrieve end_session_endpoint from provider metadata: %w", err)
+	}
+	if discovery.EndSessionEndpoint == "" {
+		return "", fmt.Errorf("end_session_endpoint not found in provider's well-known configuration")
+	}
+	return discovery.EndSessionEndpoint, nil
 }
