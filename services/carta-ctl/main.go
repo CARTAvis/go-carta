@@ -1,26 +1,21 @@
 package main
 
 import (
-	"context"
 	"embed"
 	"errors"
 	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
-	"path/filepath"
-	"strings"
-	"time"
 
 	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
 	"github.com/spf13/pflag"
 
 	"github.com/CARTAvis/go-carta/pkg/config"
 	helpers "github.com/CARTAvis/go-carta/pkg/shared"
-	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/session"
+	authpam "github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth/pam"
+	ctlhttp "github.com/CARTAvis/go-carta/services/carta-ctl/internal/http"
 
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth"
 	authoidc "github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth/oidc"
@@ -33,375 +28,20 @@ import (
 
 var (
 	runtimeSpawnerAddress string
-	pamAuth               pamwrap.Authenticator
 )
-
-func refreshHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	c, err := r.Cookie("refresh_token")
-	if err != nil {
-		http.Error(w, "Missing refresh token", http.StatusUnauthorized)
-		return
-	}
-
-	claims, err := auth.VerifyToken(c.Value)
-	if err != nil || claims.Type != auth.TokenTypeRefresh {
-		http.Error(w, "Invalid refresh token", http.StatusUnauthorized)
-		return
-	}
-
-	sessionToken, err := auth.GenerateToken(claims.Username, auth.TokenTypeAccess)
-	if err != nil {
-		slog.Error("Failed to generate access token", "error", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(map[string]interface{}{
-		"access_token": sessionToken,
-		"token_type":   "bearer",
-		"expires_in":   auth.GetAccessTokenAgeSeconds(),
-	}); err != nil {
-		slog.Error("Failed to encode refresh response", "error", err)
-	}
-}
-
-var upgrader = websocket.Upgrader{
-	// Ignore Origin header
-	CheckOrigin: func(r *http.Request) bool {
-		slog.Debug("Upgrading WebSocket connection", "origin", r.Header.Get("Origin"))
-		return true
-	},
-}
-
-// spaHandler serves static files if they exist, otherwise falls back to index.html
-type spaHandler struct {
-	root string
-	fs   http.Handler
-}
-
-func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// We can create a sub-logger for this handler from the default handler
-	logger := slog.With("service", "spaHandler")
-	// If this is a WebSocket upgrade (e.g. ws://localhost:8081), hand it to wsHandler
-	logger.Debug("Received request", "path", r.URL.Path)
-	if websocket.IsWebSocketUpgrade(r) {
-		logger.Debug("Upgrading to WebSocket", "path", r.URL.Path)
-		wsHandler(w, r)
-		return
-	}
-
-	logger.Debug("Serving HTTP request", "path", r.URL.Path)
-	// Clean and resolve requested path
-	path := r.URL.Path
-	if path == "" || path == "/" {
-		logger.Debug("Serving root, returning index.html")
-		logger.Debug("Serving root", "path", filepath.Join(h.root, "index.html"))
-		http.ServeFile(w, r, filepath.Join(h.root, "index.html"))
-		return
-	}
-
-	// Map URL path to filesystem path
-	fullPath := filepath.Join(h.root, filepath.Clean(path))
-
-	// If the file exists and is not a directory, serve it
-	if info, err := os.Stat(fullPath); err == nil && !info.IsDir() {
-		h.fs.ServeHTTP(w, r)
-		return
-	}
-
-	// For everything else (including React routes), serve index.html
-	http.ServeFile(w, r, filepath.Join(h.root, "index.html"))
-}
-
-func accessTokenFromRequest(r *http.Request) string {
-	authHeader := r.Header.Get("Authorization")
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		return strings.TrimPrefix(authHeader, "Bearer ")
-	}
-
-	return r.URL.Query().Get("token")
-}
-
-func authorizeAccessToken(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
-	tokenString := accessTokenFromRequest(r)
-	if tokenString == "" {
-		http.Error(w, "Missing or invalid access token", http.StatusUnauthorized)
-		return nil, false
-	}
-
-	claims, err := auth.VerifyToken(tokenString)
-	if err != nil || claims.Type != auth.TokenTypeAccess {
-		http.Error(w, "Invalid access token", http.StatusUnauthorized)
-		return nil, false
-	}
-
-	user := &auth.User{
-		Username: claims.Username,
-		Source:   auth.SourcePAM,
-		Claims:   map[string]any{},
-	}
-
-	return user, true
-}
-
-func wsHandler(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("Handling WebSocket connection", "remoteAddr", r.RemoteAddr)
-
-	user, ok := authorizeAccessToken(w, r)
-	if !ok {
-		return
-	}
-
-	c, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		slog.Error("Problem with HTTP upgrade", "error", err)
-		return
-	}
-	defer helpers.CloseOrLog(c)
-
-	s := session.NewSession(c, runtimeSpawnerAddress, user)
-	slog.Info("Created new session", "user", user)
-
-	// Send messages back to client through websocket
-	s.HandleConnection()
-
-	// Close worker on exit if it exists
-	defer s.HandleDisconnect()
-
-	// Basic handler based on gorilla/websocket example
-	for {
-		messageType, message, err := c.ReadMessage()
-		if err != nil {
-			slog.Error("Error reading message", "error", err)
-			break
-		}
-
-		// Ping/pong sequence
-		if messageType == websocket.TextMessage && string(message) == "PING" {
-			slog.Debug("Received PING from client, sending PONG")
-			err := c.WriteMessage(websocket.TextMessage, []byte("PONG"))
-			if err != nil {
-				slog.Error("Failed to send pong message", "error", err)
-			}
-			continue
-		}
-
-		// Ignore all other non-binary messages
-		if messageType != websocket.BinaryMessage {
-			slog.Warn("Ignoring non-binary message", "type", messageType, "message", message)
-			continue
-		}
-
-		go func() {
-			err := s.HandleMessage(message)
-			if err != nil {
-				slog.Warn("Failed to handle message", "error", err)
-			}
-		}()
-	}
-
-	// defer should shut down the worker afterwards
-	slog.Info("Client disconnected")
-}
-
-func withAccessToken(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-			http.Error(w, "Missing or invalid access token", http.StatusUnauthorized)
-			return
-		}
-
-		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-		claims, err := auth.VerifyToken(tokenString)
-		if err != nil || claims.Type != auth.TokenTypeAccess {
-			http.Error(w, "Invalid access token", http.StatusUnauthorized)
-			return
-		}
-
-		user := &auth.User{
-			Username: claims.Username,
-			Source:   auth.SourcePAM, // or determine from claims
-			Claims:   map[string]any{},
-		}
-		ctx := context.WithValue(r.Context(), session.UserContextKey, user)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-func noCache(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate")
-		w.Header().Set("Pragma", "no-cache")
-		w.Header().Set("Expires", "0")
-		w.Header().Set("Surrogate-Control", "no-store")
-		next.ServeHTTP(w, r)
-	})
-}
-
-func logoutHandler(cfg *config.Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Clear the refresh token cookie
-		http.SetCookie(w, &http.Cookie{
-			Name:     "refresh_token",
-			Value:    "",
-			Path:     "/api/auth/refresh",
-			MaxAge:   -1,
-			Expires:  time.Unix(0, 0),
-			HttpOnly: true,
-			Secure:   false,
-			SameSite: http.SameSiteLaxMode,
-		})
-
-		// Clear any stored OIDC logout cookies
-		for _, name := range []string{"oidc_id_token", "oidc_logout_endpoint"} {
-			http.SetCookie(w, &http.Cookie{
-				Name:     name,
-				Value:    "",
-				Path:     "/logout",
-				MaxAge:   -1,
-				Expires:  time.Unix(0, 0),
-				HttpOnly: true,
-				Secure:   false,
-				SameSite: http.SameSiteLaxMode,
-			})
-		}
-
-		// If OIDC ID token and logout endpoint cookies exist, redirect through provider's logout endpoint
-		idTokenCookie, idTokenErr := r.Cookie("oidc_id_token")
-		logoutEndpointCookie, endpointErr := r.Cookie("oidc_logout_endpoint")
-		if idTokenErr == nil && endpointErr == nil && idTokenCookie.Value != "" && logoutEndpointCookie.Value != "" {
-			logoutURL := buildOIDCLogoutURL(logoutEndpointCookie.Value, idTokenCookie.Value, cfg.Controller.OIDC.AppURL)
-			http.Redirect(w, r, logoutURL, http.StatusFound)
-			return
-		}
-
-		// Default: redirect to login page
-		loginAddr := "/login"
-		switch cfg.Controller.AuthMode {
-		case config.AuthPAM:
-			loginAddr = "/pam-login"
-		case config.AuthOIDC:
-			loginAddr = "/oidc/login"
-		case config.AuthBoth:
-			loginAddr = "/login"
-		}
-		http.Redirect(w, r, loginAddr, http.StatusFound)
-	}
-}
-
-func buildOIDCLogoutURL(logoutEndpoint, idTokenHint, postLogoutRedirectURI string) string {
-	u, err := url.Parse(logoutEndpoint)
-	if err != nil {
-		return logoutEndpoint
-	}
-	q := u.Query()
-	q.Set("id_token_hint", idTokenHint)
-	if postLogoutRedirectURI != "" {
-		q.Set("post_logout_redirect_uri", postLogoutRedirectURI)
-	} else {
-		slog.Warn("OIDC app_url not configured, logout will not redirect to login page after logout")
-	}
-	u.RawQuery = q.Encode()
-	return u.String()
-}
 
 //go:embed templates/*.html
 var templates embed.FS
 var pamLoginTmpl *template.Template
 
-func pamLoginHandler(p pamwrap.Authenticator) http.Handler {
-	slog.Info("Setting up PAM login handler")
-
-	type pageData struct {
-		Title   string
-		Heading string
-		Error   string
-	}
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		slog.Info("Handling PAM login request", "method", r.Method)
-
-		switch r.Method {
-
-		case http.MethodGet:
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-			_ = pamLoginTmpl.Execute(w, pageData{
-				Title:   "CARTA Login",
-				Heading: "CARTA Login (PAM)",
-			})
-
-		case http.MethodPost:
-			if err := r.ParseForm(); err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				if err := json.NewEncoder(w).Encode(map[string]string{"error": "Bad form"}); err != nil {
-					slog.Error("Failed to encode bad form response", "error", err)
-				}
-				return
-			}
-
-			username := r.Form.Get("username")
-			password := r.Form.Get("password")
-
-			if username == "" || password == "" {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				if err := json.NewEncoder(w).Encode(map[string]string{"error": "Missing username or password"}); err != nil {
-					slog.Error("Failed to encode missing credentials response", "error", err)
-				}
-				return
-			}
-
-			user, err := p.AuthenticateCredentials(r.Context(), username, password)
-			if err != nil {
-				slog.Error("PAM login failed", "username", username, "error", err)
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnauthorized)
-				if err := json.NewEncoder(w).Encode(map[string]string{"error": "Invalid credentials"}); err != nil {
-					slog.Error("Failed to encode invalid credentials response", "error", err)
-				}
-				return
-			}
-			slog.Info("About to set PAM session cookie", "username", user.Username)
-
-			if err := auth.SetRefreshTokenCookie(w, user.Username); err != nil {
-				slog.Error("Failed to set PAM session cookie", "username", user.Username, "error", err)
-				http.Error(w, "Session error", http.StatusInternalServerError)
-				return
-			}
-
-			// Dump Set-Cookie headers to confirm what we sent
-			for _, c := range w.Header()["Set-Cookie"] {
-				slog.Info("Set-Cookie", "value", c)
-			}
-
-			slog.Info("Cookie set, redirecting", "to", "/")
-			http.Redirect(w, r, "/", http.StatusFound)
-
-			return
-
-		default:
-			slog.Warn("Ignoring unsupported method", "method", r.Method)
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-	})
-}
-
-var oidcAuth *authoidc.OIDCAuthenticator
-
 func main() {
 	logger := helpers.NewLogger("carta-ctl", "info")
 	slog.SetDefault(logger)
+
+	var (
+		pamAuth  pamwrap.Authenticator
+		oidcAuth *authoidc.OIDCAuthenticator
+	)
 
 	id := uuid.New()
 	slog.Info("Starting controller", "uuid", id.String())
@@ -516,8 +156,8 @@ func main() {
 		db.InitDb()
 		http.Handle(
 			"/api/database/",
-			noCache(
-				withAccessToken(
+			ctlhttp.NoCache(
+				ctlhttp.WithAccessToken(
 					http.StripPrefix("/api/database", http.Handler(db.Router())))))
 	} else {
 		slog.Debug("Defaulting to backend's filesystem-based state-saving")
@@ -533,6 +173,7 @@ func main() {
 
 		slog.Info("Serving carta_frontend", "dirname", cfg.Controller.FrontendDir)
 		fs := http.FileServer(http.Dir(cfg.Controller.FrontendDir))
+		wsHandler := ctlhttp.NewWebSocketHandler(runtimeSpawnerAddress)
 
 		if oidcAuth != nil && (cfg.Controller.AuthMode == config.AuthOIDC || cfg.Controller.AuthMode == config.AuthBoth) {
 			http.Handle("/oidc/login", http.HandlerFunc(oidcAuth.LoginHandler))
@@ -544,26 +185,27 @@ func main() {
 		//  - /static/... -> real files
 		//  - /whatever   -> index.html (for SPA routes)
 		// The SPA itself is public; API and WebSocket upgrade paths require access tokens.
-		http.Handle("/", spaHandler{
-			root: cfg.Controller.FrontendDir,
-			fs:   fs,
+		http.Handle("/", ctlhttp.SPAHandler{
+			Root:      cfg.Controller.FrontendDir,
+			FS:        fs,
+			WSHandler: wsHandler,
 		})
 
 		// Expose the PAM login page only when PAM is enabled.
 		if pamAuth != nil && (cfg.Controller.AuthMode == config.AuthPAM || cfg.Controller.AuthMode == config.AuthBoth) {
-			http.Handle("/pam-login", pamLoginHandler(pamAuth))
+			http.Handle("/pam-login", authpam.NewLoginHandler(pamAuth, pamLoginTmpl))
 		}
 	} else {
 		slog.Warn("No frontend directory specified: controller will *not* serve the frontend (only /carta WebSocket).")
 	}
 
 	// Token refresh endpoint remains open to refresh cookies only.
-	http.HandleFunc("/api/auth/refresh", refreshHandler)
+	http.HandleFunc("/api/auth/refresh", ctlhttp.RefreshHandler)
 	// Logout endpoint clears the refresh cookie and redirects to login.
-	http.HandleFunc("/logout", logoutHandler(cfg))
+	http.HandleFunc("/logout", ctlhttp.LogoutHandler(cfg))
 
 	// Require access tokens on all other /api/ requests.
-	http.Handle("/api/", withAccessToken(http.NotFoundHandler()))
+	http.Handle("/api/", ctlhttp.WithAccessToken(http.NotFoundHandler()))
 
 	cfgHandler := func(w http.ResponseWriter, r *http.Request) {
 
