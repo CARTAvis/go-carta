@@ -63,11 +63,13 @@ func refreshHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"access_token": sessionToken,
 		"token_type":   "bearer",
 		"expires_in":   auth.GetAccessTokenAgeSeconds(),
-	})
+	}); err != nil {
+		slog.Error("Failed to encode refresh response", "error", err)
+	}
 }
 
 var upgrader = websocket.Upgrader{
@@ -341,7 +343,9 @@ func pamLoginHandler(p pamwrap.Authenticator) http.Handler {
 			if err := r.ParseForm(); err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]string{"error": "Bad form"})
+				if err := json.NewEncoder(w).Encode(map[string]string{"error": "Bad form"}); err != nil {
+					slog.Error("Failed to encode bad form response", "error", err)
+				}
 				return
 			}
 
@@ -351,7 +355,9 @@ func pamLoginHandler(p pamwrap.Authenticator) http.Handler {
 			if username == "" || password == "" {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]string{"error": "Missing username or password"})
+				if err := json.NewEncoder(w).Encode(map[string]string{"error": "Missing username or password"}); err != nil {
+					slog.Error("Failed to encode missing credentials response", "error", err)
+				}
 				return
 			}
 
@@ -360,7 +366,9 @@ func pamLoginHandler(p pamwrap.Authenticator) http.Handler {
 				slog.Error("PAM login failed", "username", username, "error", err)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
-				json.NewEncoder(w).Encode(map[string]string{"error": "Invalid credentials"})
+				if err := json.NewEncoder(w).Encode(map[string]string{"error": "Invalid credentials"}); err != nil {
+					slog.Error("Failed to encode invalid credentials response", "error", err)
+				}
 				return
 			}
 			slog.Info("About to set PAM session cookie", "username", user.Username)
