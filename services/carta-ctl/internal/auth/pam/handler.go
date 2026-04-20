@@ -3,7 +3,6 @@ package pam
 import (
 	"context"
 	"encoding/json"
-	"html/template"
 	"log/slog"
 	"net/http"
 
@@ -16,27 +15,15 @@ type loginAuthenticator interface {
 	AuthenticateCredentials(ctx context.Context, username, password string) (*auth.User, error)
 }
 
-func NewLoginHandler(p loginAuthenticator, tmpl *template.Template) http.Handler {
+func NewLoginHandler(p loginAuthenticator) http.Handler {
 	slog.Info("Setting up PAM login handler")
-
-	type pageData struct {
-		Title   string
-		Heading string
-		Error   string
-	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("Handling PAM login request", "method", r.Method)
 
 		switch r.Method {
 		case http.MethodGet:
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			if err := tmpl.Execute(w, pageData{
-				Title:   "CARTA Login",
-				Heading: "CARTA Login (PAM)",
-			}); err != nil {
-				slog.Error("Failed to render PAM login page", "error", err)
-			}
+			http.Redirect(w, r, "/login", http.StatusFound)
 
 		case http.MethodPost:
 			if err := r.ParseForm(); err != nil {
@@ -82,8 +69,13 @@ func NewLoginHandler(p loginAuthenticator, tmpl *template.Template) http.Handler
 				slog.Info("Set-Cookie", "value", c)
 			}
 
-			slog.Info("Cookie set, redirecting", "to", "/")
-			http.Redirect(w, r, "/", http.StatusFound)
+			redirectURL := "/"
+			if r.URL.RawQuery != "" {
+				redirectURL = "/?" + r.URL.RawQuery
+			}
+
+			slog.Info("Cookie set, redirecting", "to", redirectURL)
+			http.Redirect(w, r, redirectURL, http.StatusFound)
 			return
 
 		default:

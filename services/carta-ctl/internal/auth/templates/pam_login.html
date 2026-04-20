@@ -80,7 +80,7 @@
           <p class="error">{{ .Error }}</p>
         {{ end }}
 
-        <form method="POST">
+        <form method="POST" action="{{ .Action }}">
           <div class="row">
             <label for="username">Username</label>
             <input id="username" name="username" autocomplete="username" />

@@ -1,10 +1,8 @@
 package main
 
 import (
-	"embed"
 	"errors"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"os"
@@ -29,10 +27,6 @@ import (
 var (
 	runtimeSpawnerAddress string
 )
-
-//go:embed templates/*.html
-var templates embed.FS
-var pamLoginTmpl *template.Template
 
 func main() {
 	logger := helpers.NewLogger("carta-ctl", "info")
@@ -88,10 +82,6 @@ func main() {
 	logger = helpers.NewLogger("carta-ctl", cfg.LogLevel)
 	slog.SetDefault(logger)
 
-	pamLoginTmpl = template.Must(
-		template.ParseFS(templates, "templates/pam_login.html"),
-	)
-
 	runtimeSpawnerAddress = cfg.Controller.SpawnerAddress
 	if runtimeSpawnerAddress == "" {
 		runtimeSpawnerAddress = fmt.Sprintf("http://%s:%d", cfg.Spawner.Hostname, cfg.Spawner.Port)
@@ -138,15 +128,6 @@ func main() {
 	}
 
 	authLoginAddress := "/login"
-	switch cfg.Controller.AuthMode {
-	case config.AuthPAM:
-		authLoginAddress = "/pam-login"
-	case config.AuthOIDC:
-		authLoginAddress = "/oidc/login"
-	case config.AuthBoth:
-		// For both, could have a combined login page, but for now default to /login
-		authLoginAddress = "/login"
-	}
 
 	if cfg.Controller.DBConnectionString != "" {
 		slog.Debug("Database connection string provided", "db_conn_string", cfg.Controller.DBConnectionString)
@@ -180,6 +161,10 @@ func main() {
 			http.Handle("/oidc/callback", http.HandlerFunc(oidcAuth.CallbackHandler))
 		}
 
+		if cfg.Controller.AuthMode != config.AuthNone {
+			http.Handle("/login", auth.LoginPageHandler())
+		}
+
 		// Root handler behaves like carta_backend:
 		//  - /           -> index.html
 		//  - /static/... -> real files
@@ -193,7 +178,7 @@ func main() {
 
 		// Expose the PAM login page only when PAM is enabled.
 		if pamAuth != nil && (cfg.Controller.AuthMode == config.AuthPAM || cfg.Controller.AuthMode == config.AuthBoth) {
-			http.Handle("/pam-login", authpam.NewLoginHandler(pamAuth, pamLoginTmpl))
+			http.Handle("/pam-login", authpam.NewLoginHandler(pamAuth))
 		}
 	} else {
 		slog.Warn("No frontend directory specified: controller will *not* serve the frontend (only /carta WebSocket).")
