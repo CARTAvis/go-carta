@@ -100,7 +100,9 @@ func ServeCartaLogo() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		w.Header().Set("Cache-Control", "public, max-age=86400")
-		w.Write(cartaLogoSVG)
+		if _, err := w.Write(cartaLogoSVG); err != nil {
+			slog.Error("Failed to serve CARTA logo", "error", err)
+		}
 	})
 }
 
