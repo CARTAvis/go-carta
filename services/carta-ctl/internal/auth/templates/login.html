@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ .Title }} – Login</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+
+      html, body {
+        height: 100%;
+        margin: 0;
+        font-family: "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        background: #e8f0fe;
+        color: #333;
+      }
+
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .card {
+        background: #fff;
+        width: min(520px, calc(100% - 32px));
+        border-radius: 8px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+        overflow: hidden;
+      }
+
+      /* Site banner strip at the top of the card */
+      .banner {
+        background: #d6e4f0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 12px 24px;
+      }
+
+      .banner img {
+        max-height: 48px;
+        max-width: 100%;
+      }
+
+      .card-body {
+        padding: 28px 36px 24px;
+        text-align: center;
+      }
+
+      /* CARTA logo + title row */
+      .branding {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        margin-bottom: 4px;
+      }
+
+      .branding img {
+        height: 56px;
+        width: auto;
+      }
+
+      .branding-text {
+        text-align: left;
+      }
+
+      .branding-text h1 {
+        margin: 0;
+        font-size: 1.6rem;
+        color: #1a3a5c;
+        font-weight: 600;
+      }
+
+      .branding-text .subtitle {
+        margin: 0;
+        font-size: 0.78rem;
+        color: #3a7bbf;
+        letter-spacing: 0.02em;
+      }
+
+      .welcome {
+        margin: 14px 0 20px;
+        font-size: 0.9rem;
+        color: #555;
+        line-height: 1.45;
+      }
+
+      /* Error flash */
+      .error {
+        color: #b00020;
+        margin: 0 0 14px;
+        font-size: 0.88rem;
+      }
+
+      /* PAM form fields */
+      .field {
+        margin-bottom: 14px;
+        text-align: left;
+      }
+
+      .field input {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid #bbb;
+        border-radius: 4px;
+        font-size: 0.95rem;
+        background: #f0f0f0;
+      }
+
+      .field input:focus {
+        outline: none;
+        border-color: #3a7bbf;
+        background: #fff;
+      }
+
+      /* Shared button style */
+      .btn {
+        display: block;
+        width: 100%;
+        padding: 12px;
+        border: none;
+        border-radius: 4px;
+        font-size: 0.95rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        cursor: pointer;
+        text-transform: uppercase;
+        text-decoration: none;
+        text-align: center;
+        color: #fff;
+        background: #2b5f8a;
+      }
+
+      .btn:hover {
+        background: #1e476b;
+      }
+
+      /* Divider between PAM and OIDC sections */
+      .divider {
+        display: flex;
+        align-items: center;
+        margin: 20px 0;
+        gap: 12px;
+        color: #999;
+        font-size: 0.82rem;
+        text-transform: uppercase;
+      }
+
+      .divider::before,
+      .divider::after {
+        content: "";
+        flex: 1;
+        border-top: 1px solid #ddd;
+      }
+
+      /* Support footer */
+      .support {
+        margin-top: 24px;
+        padding-top: 16px;
+        font-size: 0.82rem;
+        color: #666;
+        line-height: 1.4;
+      }
+
+      .support a {
+        color: #2b5f8a;
+        text-decoration: underline;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="card">
+
+      {{ if .HasBanner }}
+      <div class="banner">
+        <img src="{{ .BannerURL }}" alt="Site banner" />
+      </div>
+      {{ end }}
+
+      <div class="card-body">
+        <div class="branding">
+          <img src="/login/logo" alt="CARTA logo" />
+          <div class="branding-text">
+            <h1>{{ .Title }}</h1>
+            <p class="subtitle">Cube Analysis and Rendering Tool for Astronomy</p>
+          </div>
+        </div>
+
+        {{ if .WelcomeText }}
+        <p class="welcome">{{ .WelcomeText }}</p>
+        {{ end }}
+
+        {{ if .Error }}
+        <p class="error">{{ .Error }}</p>
+        {{ end }}
+
+        {{ if .ShowPAM }}
+        <form method="POST" action="{{ .PAMAction }}">
+          <div class="field">
+            <input id="username" name="username" placeholder="Username" autocomplete="username" required />
+          </div>
+          <div class="field">
+            <input id="password" name="password" type="password" placeholder="Password" autocomplete="current-password" required />
+          </div>
+          <button class="btn" type="submit">Sign In</button>
+        </form>
+        {{ end }}
+
+        {{ if and .ShowPAM .ShowOIDC }}
+        <div class="divider">or</div>
+        {{ end }}
+
+        {{ if .ShowOIDC }}
+        <a class="btn" href="{{ .OIDCAction }}">Sign In with SSO</a>
+        {{ end }}
+
+        {{ if .SupportText }}
+        <div class="support">{{ safeHTML .SupportText }}</div>
+        {{ end }}
+      </div>
+
+    </div>
+  </body>
+</html>

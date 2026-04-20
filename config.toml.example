@@ -44,6 +44,25 @@ spawner_address = "http://localhost:8080"
 api_prefix = "/api"
 
 # ----------------------------------------------------------------------------
+# Login Page Configuration
+# ----------------------------------------------------------------------------
+[controller.login_page]
+
+# Title displayed alongside the CARTA logo on the login page
+title = "CARTA"
+
+# Welcome / instruction text shown below the logo
+welcome_text = "Welcome to the CARTA server."
+
+# Path to an optional site banner image displayed at the top of the login page.
+# Leave empty for no banner.
+site_banner = ""
+
+# Optional support text shown at the bottom of the login page (HTML allowed).
+# Example: 'If you have problems, please contact <a href="mailto:support@example.org">support</a>.'
+support_text = ""
+
+# ----------------------------------------------------------------------------
 # PAM Authentication Configuration (when auth_mode = "pam" or "both")
 # ----------------------------------------------------------------------------
 [controller.pam]

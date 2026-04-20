@@ -133,7 +133,7 @@ func setPKCECookies(w http.ResponseWriter, state, verifier string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "oidc_state",
 		Value:    state,
-		Path:     "/oidc",
+		Path:     "/api/auth",
 		HttpOnly: true,
 		Secure:   false,
 		SameSite: http.SameSiteLaxMode,
@@ -143,7 +143,7 @@ func setPKCECookies(w http.ResponseWriter, state, verifier string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "oidc_code_verifier",
 		Value:    verifier,
-		Path:     "/oidc",
+		Path:     "/api/auth",
 		HttpOnly: true,
 		Secure:   false,
 		SameSite: http.SameSiteLaxMode,
@@ -155,7 +155,7 @@ func clearPKCECookies(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "oidc_state",
 		Value:    "",
-		Path:     "/oidc",
+		Path:     "/api/auth",
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   false,
@@ -164,7 +164,7 @@ func clearPKCECookies(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "oidc_code_verifier",
 		Value:    "",
-		Path:     "/oidc",
+		Path:     "/api/auth",
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   false,

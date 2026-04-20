@@ -162,7 +162,9 @@ func main() {
 		}
 
 		if cfg.Controller.AuthMode != config.AuthNone {
-			http.Handle("/login", auth.LoginPageHandler())
+			http.Handle("/login", auth.LoginPageHandler(cfg))
+			http.Handle("/login/logo", auth.ServeCartaLogo())
+			http.Handle("/login/banner", auth.ServeSiteBanner(cfg.Controller.LoginPage.SiteBanner))
 		}
 
 		// Root handler behaves like carta_backend:
