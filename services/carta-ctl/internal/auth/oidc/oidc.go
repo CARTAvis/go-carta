@@ -76,10 +76,11 @@ func New(cfg config.OIDCConfig) (*OIDCAuthenticator, error) {
 //
 // Behaviour for browser flows:
 //
-//  1. If path is /oidc/login or /oidc/callback → we *don't* handle here
+//  1. If path is /api/auth/oidc_login or /api/auth/oidc_callback
+//     → we *don't* handle here
 //     (those handlers are wired separately).
 //  2. Try to authenticate from the session cookie (carta_oidc).
-//  3. If no valid cookie and no Bearer token → redirect to /oidc/login.
+//  3. If no valid cookie and no Bearer token → redirect to /api/auth/oidc_login.
 //
 // Behaviour for API clients:
 //
@@ -87,7 +88,7 @@ func New(cfg config.OIDCConfig) (*OIDCAuthenticator, error) {
 //  2. If valid → return user; if invalid → 401 via caller.
 func (o *OIDCAuthenticator) AuthenticateHTTP(w http.ResponseWriter, r *http.Request) (*auth.User, error) {
 	// Allow the OIDC endpoints themselves to run without auth.
-	if r.URL.Path == "/oidc/login" || r.URL.Path == "/oidc/callback" {
+	if r.URL.Path == "/api/auth/oidc_login" || r.URL.Path == "/api/auth/oidc_callback" {
 		return nil, fmt.Errorf("oidc endpoint passthrough")
 	}
 
@@ -109,7 +110,7 @@ func (o *OIDCAuthenticator) AuthenticateHTTP(w http.ResponseWriter, r *http.Requ
 	}
 
 	// 3. No session → redirect browser to login
-	http.Redirect(w, r, "/oidc/login", http.StatusFound)
+	http.Redirect(w, r, "/api/auth/oidc_login", http.StatusFound)
 	return nil, fmt.Errorf("no OIDC session")
 }
 

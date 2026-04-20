@@ -157,8 +157,8 @@ func main() {
 		wsHandler := ctlhttp.NewWebSocketHandler(runtimeSpawnerAddress)
 
 		if oidcAuth != nil && (cfg.Controller.AuthMode == config.AuthOIDC || cfg.Controller.AuthMode == config.AuthBoth) {
-			http.Handle("/oidc/login", http.HandlerFunc(oidcAuth.LoginHandler))
-			http.Handle("/oidc/callback", http.HandlerFunc(oidcAuth.CallbackHandler))
+			http.Handle("/api/auth/oidc_login", http.HandlerFunc(oidcAuth.LoginHandler))
+			http.Handle("/api/auth/oidc_callback", http.HandlerFunc(oidcAuth.CallbackHandler))
 		}
 
 		if cfg.Controller.AuthMode != config.AuthNone {
@@ -176,9 +176,9 @@ func main() {
 			WSHandler: wsHandler,
 		})
 
-		// Expose the PAM login page only when PAM is enabled.
+		// Expose the PAM login API endpoint only when PAM is enabled.
 		if pamAuth != nil && (cfg.Controller.AuthMode == config.AuthPAM || cfg.Controller.AuthMode == config.AuthBoth) {
-			http.Handle("/pam-login", authpam.NewLoginHandler(pamAuth))
+			http.Handle("/api/auth/pam_login", authpam.NewLoginHandler(pamAuth))
 		}
 	} else {
 		slog.Warn("No frontend directory specified: controller will *not* serve the frontend (only /carta WebSocket).")

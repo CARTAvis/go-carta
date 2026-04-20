@@ -47,16 +47,8 @@ func LogoutHandler(cfg *config.Config) http.HandlerFunc {
 		}
 
 		// Default: redirect to login page
-		loginAddr := "/login"
-		switch cfg.Controller.AuthMode {
-		case config.AuthPAM:
-			loginAddr = "/pam-login"
-		case config.AuthOIDC:
-			loginAddr = "/oidc/login"
-		case config.AuthBoth:
-			loginAddr = "/login"
-		}
-		http.Redirect(w, r, loginAddr, http.StatusFound)
+
+		http.Redirect(w, r, "/login", http.StatusFound)
 	}
 }
 

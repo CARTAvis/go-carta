@@ -29,9 +29,9 @@ func LoginPageHandler() http.Handler {
 			return
 		}
 
-		action := "/pam-login"
+		action := "/api/auth/pam_login"
 		if redirectParams := r.URL.Query().Get("redirectParams"); redirectParams != "" {
-			action = "/pam-login?redirectParams=" + url.QueryEscape(redirectParams)
+			action = "/api/auth/pam_login?redirectParams=" + url.QueryEscape(redirectParams)
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

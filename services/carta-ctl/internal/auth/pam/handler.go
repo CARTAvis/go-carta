@@ -22,9 +22,6 @@ func NewLoginHandler(p loginAuthenticator) http.Handler {
 		slog.Info("Handling PAM login request", "method", r.Method)
 
 		switch r.Method {
-		case http.MethodGet:
-			http.Redirect(w, r, "/login", http.StatusFound)
-
 		case http.MethodPost:
 			if err := r.ParseForm(); err != nil {
 				w.Header().Set("Content-Type", "application/json")
