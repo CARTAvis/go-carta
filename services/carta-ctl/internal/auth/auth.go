@@ -8,9 +8,19 @@ import (
 type Source string
 
 const (
-	SourcePAM  Source = "pam"
-	SourceOIDC Source = "oidc"
+	SourceUnknown Source = "unknown"
+	SourcePAM     Source = "pam"
+	SourceOIDC    Source = "oidc"
 )
+
+func NormalizeSource(source Source) Source {
+	switch source {
+	case SourcePAM, SourceOIDC:
+		return source
+	default:
+		return SourceUnknown
+	}
+}
 
 type User struct {
 	Username string
@@ -31,7 +41,7 @@ func (NoopAuthenticator) AuthenticateHTTP(w http.ResponseWriter, r *http.Request
 	// anonymous user
 	return &User{
 		Username: "anonymous",
-		Source:   "",
+		Source:   SourceUnknown,
 		Claims:   map[string]any{},
 	}, nil
 }

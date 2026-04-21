@@ -24,7 +24,7 @@ func AuthorizeAccessToken(w http.ResponseWriter, r *http.Request) (*auth.User, b
 
 	user := &auth.User{
 		Username: claims.Username,
-		Source:   auth.SourcePAM,
+		Source:   auth.NormalizeSource(claims.Source),
 		Claims:   map[string]any{},
 	}
 
@@ -48,7 +48,7 @@ func WithAccessToken(next http.Handler) http.Handler {
 
 		user := &auth.User{
 			Username: claims.Username,
-			Source:   auth.SourcePAM,
+			Source:   auth.NormalizeSource(claims.Source),
 			Claims:   map[string]any{},
 		}
 		ctx := context.WithValue(r.Context(), session.UserContextKey, user)

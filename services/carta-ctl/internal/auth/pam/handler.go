@@ -56,7 +56,7 @@ func NewLoginHandler(p loginAuthenticator) http.Handler {
 			}
 			slog.Info("About to set PAM session cookie", "username", user.Username)
 
-			if err := auth.SetRefreshTokenCookie(w, user.Username); err != nil {
+			if err := auth.SetRefreshTokenCookie(w, user.Username, auth.SourcePAM); err != nil {
 				slog.Error("Failed to set PAM session cookie", "username", user.Username, "error", err)
 				http.Error(w, "Session error", http.StatusInternalServerError)
 				return

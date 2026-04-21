@@ -20,6 +20,7 @@ const (
 
 type TokenClaims struct {
 	Username string    `json:"username"`
+	Source   Source    `json:"source,omitempty"`
 	Type     TokenType `json:"type"`
 	jwt.RegisteredClaims
 }
@@ -71,9 +72,10 @@ func InitJWT(cfg config.TokenConfig) error {
 	return nil
 }
 
-func GenerateToken(username string, tokenType TokenType) (string, error) {
+func GenerateToken(username string, source Source, tokenType TokenType) (string, error) {
 	claims := TokenClaims{
 		Username: username,
+		Source:   NormalizeSource(source),
 		Type:     tokenType,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    tokenConfig.Issuer,
@@ -91,8 +93,8 @@ func GenerateToken(username string, tokenType TokenType) (string, error) {
 }
 
 // Helper: sets session cookie for a user.
-func SetRefreshTokenCookie(w http.ResponseWriter, username string) error {
-	token, err := GenerateToken(username, TokenTypeRefresh)
+func SetRefreshTokenCookie(w http.ResponseWriter, username string, source Source) error {
+	token, err := GenerateToken(username, source, TokenTypeRefresh)
 	if err != nil {
 		return err
 	}

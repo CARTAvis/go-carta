@@ -256,7 +256,7 @@ func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Set refresh token cookie for unified JWT auth
-	if err := auth.SetRefreshTokenCookie(w, user.Username); err != nil {
+	if err := auth.SetRefreshTokenCookie(w, user.Username, auth.SourceOIDC); err != nil {
 		slog.Error("OIDC: failed to set refresh token cookie", "error", err)
 		http.Error(w, "Session error", http.StatusInternalServerError)
 		return

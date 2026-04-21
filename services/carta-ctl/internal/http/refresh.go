@@ -26,7 +26,7 @@ func RefreshHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionToken, err := auth.GenerateToken(claims.Username, auth.TokenTypeAccess)
+	sessionToken, err := auth.GenerateToken(claims.Username, auth.NormalizeSource(claims.Source), auth.TokenTypeAccess)
 	if err != nil {
 		slog.Error("Failed to generate access token", "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
