@@ -14,7 +14,6 @@ SERVICES=("carta-ctl" "carta-worker" "carta-spawn" "api")
 for SERVICE_NAME in "${SERVICES[@]}"; do
     echo "Building ${SERVICE_NAME}..."
     
-    BUILD_TAGS=""
     if [ "$SERVICE_NAME" = "carta-ctl" ]; then
         # Try building with PAM support first
         if go build -tags=pam -o "./build/${SERVICE_NAME}" "./services/${SERVICE_NAME}/" 2>&1; then
