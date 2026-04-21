@@ -99,6 +99,7 @@ func SetRefreshTokenCookie(w http.ResponseWriter, username string, source Source
 		return err
 	}
 
+	expiresAt := time.Now().Add(refreshTokenAgeDur)
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
 		Value:    token,
@@ -106,7 +107,8 @@ func SetRefreshTokenCookie(w http.ResponseWriter, username string, source Source
 		HttpOnly: true,
 		Secure:   false, // set true if serving over HTTPS
 		SameSite: http.SameSiteLaxMode,
-		// Expires set by JWT
+		Expires:  expiresAt,
+		MaxAge:   int(refreshTokenAgeDur.Seconds()),
 	})
 	return nil
 }
