@@ -58,7 +58,10 @@ welcome_text = "Welcome to the CARTA server."
 # Leave empty for no banner.
 site_banner = ""
 
-# Optional support text shown at the bottom of the login page (HTML allowed).
+# Optional support text shown at the bottom of the login page.
+# The value is sanitized server-side: only <a> tags are allowed.
+# Allowed href schemes are: https, http, and mailto.
+# All other tags/attributes are removed.
 # Example: 'If you have problems, please contact <a href="mailto:support@example.org">support</a>.'
 support_text = ""
 
@@ -108,10 +111,10 @@ public_key_location = "/etc/carta/carta_public.pem"
 # Issuer claim written into generated CARTA JWTs.
 issuer = "carta-ctl"
 
-# Lifetime of short-lived access tokens returned by /api/auth/refresh.
+# Lifetime of short-lived access tokens.
 access_token_age = "10m"
 
-# Lifetime of refresh tokens stored in the refresh_token cookie.
+# Lifetime of refresh tokens.
 refresh_token_age = "24h"
 
 # ============================================================================

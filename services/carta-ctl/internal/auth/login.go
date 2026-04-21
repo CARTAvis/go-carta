@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 
 	"github.com/CARTAvis/go-carta/pkg/config"
+	xhtml "golang.org/x/net/html"
 )
 
 //go:embed templates/*.html
@@ -18,18 +20,88 @@ var templates embed.FS
 var cartaLogoSVG []byte
 
 var loginTmpl = template.Must(
-	template.New("login.html").Funcs(template.FuncMap{
-		"safeHTML": func(s string) template.HTML {
-			return template.HTML(s)
-		},
-	}).ParseFS(templates, "templates/login.html"),
+	template.ParseFS(templates, "templates/login.html"),
 )
+
+func sanitizeSupportText(raw string) template.HTML {
+	if raw == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	z := xhtml.NewTokenizer(strings.NewReader(raw))
+
+	for {
+		tt := z.Next()
+		switch tt {
+		case xhtml.ErrorToken:
+			return template.HTML(b.String())
+		case xhtml.TextToken:
+			b.WriteString(template.HTMLEscapeString(string(z.Text())))
+		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
+			tok := z.Token()
+			if tok.Data != "a" {
+				continue
+			}
+
+			href := ""
+			title := ""
+			for _, attr := range tok.Attr {
+				switch attr.Key {
+				case "href":
+					href = attr.Val
+				case "title":
+					title = attr.Val
+				}
+			}
+
+			if !isAllowedAnchorHref(href) {
+				continue
+			}
+
+			b.WriteString("<a href=\"")
+			b.WriteString(template.HTMLEscapeString(href))
+			b.WriteString("\"")
+			if title != "" {
+				b.WriteString(" title=\"")
+				b.WriteString(template.HTMLEscapeString(title))
+				b.WriteString("\"")
+			}
+			b.WriteString(">")
+		case xhtml.EndTagToken:
+			tok := z.Token()
+			if tok.Data == "a" {
+				b.WriteString("</a>")
+			}
+		}
+	}
+}
+
+func isAllowedAnchorHref(href string) bool {
+	href = strings.TrimSpace(href)
+	if href == "" {
+		return false
+	}
+
+	u, err := url.Parse(href)
+	if err != nil {
+		return false
+	}
+
+	if u.IsAbs() {
+		scheme := strings.ToLower(u.Scheme)
+		return scheme == "http" || scheme == "https" || scheme == "mailto"
+	}
+
+	// Allow relative links only when rooted to avoid ambiguous pseudo-protocol patterns.
+	return strings.HasPrefix(href, "/")
+}
 
 // LoginPageData holds all the data needed to render the login page.
 type LoginPageData struct {
 	Title       string
 	WelcomeText string
-	SupportText string
+	SupportText template.HTML
 	HasBanner   bool
 	BannerURL   string
 	ShowPAM     bool
@@ -79,7 +151,7 @@ func LoginPageHandler(cfg *config.Config) http.Handler {
 		data := LoginPageData{
 			Title:       title,
 			WelcomeText: lp.WelcomeText,
-			SupportText: lp.SupportText,
+			SupportText: sanitizeSupportText(lp.SupportText),
 			HasBanner:   hasBanner,
 			BannerURL:   "/login/banner",
 			ShowPAM:     showPAM,
