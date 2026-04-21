@@ -127,7 +127,7 @@ func codeChallengeS256(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(hash[:])
 }
 
-func setPKCECookies(w http.ResponseWriter, state, verifier string) {
+func setPKCECookies(w http.ResponseWriter, state, verifier, redirectParams string) {
 	expires := time.Now().Add(5 * time.Minute)
 
 	http.SetCookie(w, &http.Cookie{
@@ -149,6 +149,18 @@ func setPKCECookies(w http.ResponseWriter, state, verifier string) {
 		SameSite: http.SameSiteLaxMode,
 		Expires:  expires,
 	})
+
+	if redirectParams != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "oidc_redirect_params",
+			Value:    base64.RawURLEncoding.EncodeToString([]byte(redirectParams)),
+			Path:     "/api/auth",
+			HttpOnly: true,
+			Secure:   false,
+			SameSite: http.SameSiteLaxMode,
+			Expires:  expires,
+		})
+	}
 }
 
 func clearPKCECookies(w http.ResponseWriter) {
@@ -163,6 +175,15 @@ func clearPKCECookies(w http.ResponseWriter) {
 	})
 	http.SetCookie(w, &http.Cookie{
 		Name:     "oidc_code_verifier",
+		Value:    "",
+		Path:     "/api/auth",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oidc_redirect_params",
 		Value:    "",
 		Path:     "/api/auth",
 		MaxAge:   -1,
@@ -189,7 +210,7 @@ func (o *OIDCAuthenticator) LoginHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	challenge := codeChallengeS256(verifier)
-	setPKCECookies(w, state, verifier)
+	setPKCECookies(w, state, verifier, r.URL.Query().Get("redirectParams"))
 
 	url := o.oauth2.AuthCodeURL(state, oauth2.AccessTypeOffline,
 		oauth2.SetAuthURLParam("code_challenge", challenge),
@@ -229,6 +250,17 @@ func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Reque
 		slog.Error("OIDC: missing PKCE code verifier", "error", err)
 		http.Error(w, "Missing PKCE code verifier", http.StatusBadRequest)
 		return
+	}
+
+	redirectURL := "/"
+	redirectParamsCookie, rpErr := r.Cookie("oidc_redirect_params")
+	if rpErr == nil && redirectParamsCookie.Value != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(redirectParamsCookie.Value)
+		if err != nil {
+			slog.Warn("OIDC: failed to decode redirect params cookie", "error", err)
+		} else if len(decoded) > 0 {
+			redirectURL = "/?" + string(decoded)
+		}
 	}
 
 	clearPKCECookies(w)
@@ -290,7 +322,7 @@ func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Reque
 
 	slog.Info("OIDC: login successful", "username", user.Username)
 
-	http.Redirect(w, r, "/", http.StatusFound)
+	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 
 // verifyRawToken verifies an ID token string and builds an auth.User from it.
