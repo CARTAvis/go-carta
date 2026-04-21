@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	helpers "github.com/CARTAvis/go-carta/pkg/shared"
+	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth"
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/session"
 	"github.com/gorilla/websocket"
 )
@@ -17,13 +18,23 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-func NewWebSocketHandler(runtimeSpawnerAddress string) http.HandlerFunc {
+func NewWebSocketHandler(runtimeSpawnerAddress string, authEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("Handling WebSocket connection", "remoteAddr", r.RemoteAddr)
 
-		user, ok := AuthorizeAccessToken(w, r)
-		if !ok {
-			return
+		var user *auth.User
+		if authEnabled {
+			authorizedUser, ok := AuthorizeAccessToken(w, r)
+			if !ok {
+				return
+			}
+			user = authorizedUser
+		} else {
+			user = &auth.User{
+				Username: "anonymous",
+				Source:   auth.SourceUnknown,
+				Claims:   map[string]any{},
+			}
 		}
 
 		c, err := upgrader.Upgrade(w, r, nil)

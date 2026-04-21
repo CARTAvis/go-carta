@@ -9,6 +9,19 @@ import (
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/session"
 )
 
+func userFromAccessToken(tokenString string) (*auth.User, bool) {
+	claims, err := auth.VerifyToken(tokenString)
+	if err != nil || claims.Type != auth.TokenTypeAccess {
+		return nil, false
+	}
+
+	return &auth.User{
+		Username: claims.Username,
+		Source:   auth.NormalizeSource(claims.Source),
+		Claims:   map[string]any{},
+	}, true
+}
+
 func AuthorizeAccessToken(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
 	tokenString := accessTokenFromRequest(r)
 	if tokenString == "" {
@@ -16,16 +29,10 @@ func AuthorizeAccessToken(w http.ResponseWriter, r *http.Request) (*auth.User, b
 		return nil, false
 	}
 
-	claims, err := auth.VerifyToken(tokenString)
-	if err != nil || claims.Type != auth.TokenTypeAccess {
+	user, ok := userFromAccessToken(tokenString)
+	if !ok {
 		http.Error(w, "Invalid access token", http.StatusUnauthorized)
 		return nil, false
-	}
-
-	user := &auth.User{
-		Username: claims.Username,
-		Source:   auth.NormalizeSource(claims.Source),
-		Claims:   map[string]any{},
 	}
 
 	return user, true
@@ -40,17 +47,12 @@ func WithAccessToken(next http.Handler) http.Handler {
 		}
 
 		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-		claims, err := auth.VerifyToken(tokenString)
-		if err != nil || claims.Type != auth.TokenTypeAccess {
+		user, ok := userFromAccessToken(tokenString)
+		if !ok {
 			http.Error(w, "Invalid access token", http.StatusUnauthorized)
 			return
 		}
 
-		user := &auth.User{
-			Username: claims.Username,
-			Source:   auth.NormalizeSource(claims.Source),
-			Claims:   map[string]any{},
-		}
 		ctx := context.WithValue(r.Context(), session.UserContextKey, user)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

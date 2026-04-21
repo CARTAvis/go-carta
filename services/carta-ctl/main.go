@@ -164,7 +164,7 @@ func main() {
 
 		slog.Info("Serving carta_frontend", "dirname", cfg.Controller.FrontendDir)
 		fs := http.FileServer(http.Dir(cfg.Controller.FrontendDir))
-		wsHandler := ctlhttp.NewWebSocketHandler(runtimeSpawnerAddress)
+		wsHandler := ctlhttp.NewWebSocketHandler(runtimeSpawnerAddress, cfg.Controller.AuthMode != config.AuthNone)
 
 		if oidcAuth != nil && (cfg.Controller.AuthMode == config.AuthOIDC || cfg.Controller.AuthMode == config.AuthBoth) {
 			http.Handle("/api/auth/oidc_login", http.HandlerFunc(oidcAuth.LoginHandler))
