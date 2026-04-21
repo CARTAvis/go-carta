@@ -85,7 +85,34 @@ client_id = ""
 client_secret = ""
 
 # OIDC redirect/callback URL
+# Example: "http://localhost:8081/api/auth/oidc_callback"
 redirect_url = ""
+
+# Public application URL used for OIDC logout redirects after sign-out.
+# Example: "http://localhost:8081/login"
+app_url = ""
+
+# ----------------------------------------------------------------------------
+# JWT Token Configuration
+# ----------------------------------------------------------------------------
+[controller.token_config]
+
+# PEM-encoded private key used to sign CARTA JWTs.
+# Defaults to /etc/carta/carta_private.pem if omitted.
+private_key_location = "/etc/carta/carta_private.pem"
+
+# PEM-encoded public key used to verify CARTA JWTs.
+# Defaults to /etc/carta/carta_public.pem if omitted.
+public_key_location = "/etc/carta/carta_public.pem"
+
+# Issuer claim written into generated CARTA JWTs.
+issuer = "carta-ctl"
+
+# Lifetime of short-lived access tokens returned by /api/auth/refresh.
+access_token_age = "10m"
+
+# Lifetime of refresh tokens stored in the refresh_token cookie.
+refresh_token_age = "24h"
 
 # ============================================================================
 # Spawner Configuration

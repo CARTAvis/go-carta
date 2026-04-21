@@ -187,12 +187,12 @@ func main() {
 	}
 
 	// Token refresh endpoint remains open to refresh cookies only.
-	http.HandleFunc("/api/auth/refresh", ctlhttp.RefreshHandler)
+	http.Handle("/api/auth/refresh", ctlhttp.NoCache(http.HandlerFunc(ctlhttp.RefreshHandler)))
 	// Logout endpoint clears the refresh cookie and redirects to login.
-	http.HandleFunc("/logout", ctlhttp.LogoutHandler(cfg))
+	http.Handle("/logout", ctlhttp.NoCache(ctlhttp.LogoutHandler(cfg)))
 
 	// Require access tokens on all other /api/ requests.
-	http.Handle("/api/", ctlhttp.WithAccessToken(http.NotFoundHandler()))
+	http.Handle("/api/", ctlhttp.NoCache(ctlhttp.WithAccessToken(http.NotFoundHandler())))
 
 	cfgHandler := func(w http.ResponseWriter, r *http.Request) {
 

@@ -101,6 +101,14 @@
         text-align: left;
       }
 
+      .field label {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: #2b2b2b;
+      }
+
       .field input {
         width: 100%;
         padding: 10px 12px;
@@ -201,9 +209,11 @@
         {{ if .ShowPAM }}
         <form method="POST" action="{{ .PAMAction }}">
           <div class="field">
+            <label for="username">Username</label>
             <input id="username" name="username" placeholder="Username" autocomplete="username" required />
           </div>
           <div class="field">
+            <label for="password">Password</label>
             <input id="password" name="password" type="password" placeholder="Password" autocomplete="current-password" required />
           </div>
           <button class="btn" type="submit">Sign In</button>
