@@ -59,8 +59,8 @@ func NewLoginHandler(p loginAuthenticator) http.Handler {
 				return
 			}
 
-			for _, c := range w.Header()["Set-Cookie"] {
-				slog.Info("Set-Cookie", "value", c)
+			if cookieCount := len(w.Header()["Set-Cookie"]); cookieCount > 0 {
+				slog.Info("Set-Cookie headers set", "count", cookieCount)
 			}
 
 			redirectURL := "/"
