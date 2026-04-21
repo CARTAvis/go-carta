@@ -70,11 +70,6 @@ func main() {
 
 	cfg := config.Load(pflag.Lookup("config").Value.String(), pflag.Lookup("override").Value.String())
 
-	if err := auth.InitJWT(cfg.Controller.TokenConfig); err != nil {
-		slog.Error("Failed to initialize JWT", "error", err)
-		os.Exit(1)
-	}
-
 	slog.Info("Cfg auth_mode", "authMode", cfg.Controller.AuthMode)
 	slog.Info("Cfg auth_mode", "cfg.Controller.AuthMode", cfg.Controller.AuthMode)
 
@@ -91,8 +86,13 @@ func main() {
 
 	switch cfg.Controller.AuthMode {
 	case config.AuthNone:
-		// No authentication required
+		// No authentication required - JWT not needed
 	case config.AuthPAM:
+		// Initialize JWT for token generation and verification
+		if err := auth.InitJWT(cfg.Controller.TokenConfig); err != nil {
+			slog.Error("Failed to initialize JWT for PAM authentication", "error", err)
+			os.Exit(1)
+		}
 		p, err := pamwrap.New(cfg.Controller.PAM)
 		if err != nil {
 			slog.Error("PAM is not available on this platform", "error", err)
@@ -101,6 +101,11 @@ func main() {
 		pamAuth = p
 
 	case config.AuthOIDC:
+		// Initialize JWT for token generation and verification
+		if err := auth.InitJWT(cfg.Controller.TokenConfig); err != nil {
+			slog.Error("Failed to initialize JWT for OIDC authentication", "error", err)
+			os.Exit(1)
+		}
 		o, err := authoidc.New(cfg.Controller.OIDC)
 		if err != nil {
 			slog.Error("Failed to initialize OIDC authentication", "error", err)
@@ -109,6 +114,11 @@ func main() {
 		oidcAuth = o
 
 	case config.AuthBoth:
+		// Initialize JWT for token generation and verification
+		if err := auth.InitJWT(cfg.Controller.TokenConfig); err != nil {
+			slog.Error("Failed to initialize JWT for 'both' authentication mode", "error", err)
+			os.Exit(1)
+		}
 		p, err := pamwrap.New(cfg.Controller.PAM)
 		if err != nil {
 			slog.Error("Auth mode 'both' requires PAM, but PAM is not available on this platform", "error", err)
