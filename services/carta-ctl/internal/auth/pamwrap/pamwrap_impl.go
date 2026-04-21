@@ -1,4 +1,4 @@
-//go:build pam
+//go:build linux && pam
 
 package pamwrap
 

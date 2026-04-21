@@ -1,6 +1,6 @@
 #!/bin/bash
 
-if [ ! -d "services" ] || [ ! -d "scripts" ]; then
+if [ ! -d "services" ]; then
     echo -e "Error: Could not find the 'services' folder. Please run the script from the project root directory."
     exit 1
 fi
@@ -17,9 +17,8 @@ for SERVICE_NAME in "${SERVICES[@]}"; do
     BUILD_TAGS=""
     if [ "$SERVICE_NAME" = "carta-ctl" ]; then
         # Try building with PAM support first
-        echo "Attempting to build with PAM support..."
         if go build -tags=pam -o "./build/${SERVICE_NAME}" "./services/${SERVICE_NAME}/" 2>&1; then
-            echo "PAM support enabled successfully."
+            :
         else
             echo "PAM build failed, building without PAM support."
             if ! go build -o "./build/${SERVICE_NAME}" "./services/${SERVICE_NAME}/"; then
