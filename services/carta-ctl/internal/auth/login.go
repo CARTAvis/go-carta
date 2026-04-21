@@ -158,6 +158,7 @@ func LoginPageHandler(cfg *config.Config) http.Handler {
 			ShowOIDC:    showOIDC,
 			PAMAction:   pamAction,
 			OIDCAction:  oidcAction,
+			Error:       r.URL.Query().Get("error"),
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

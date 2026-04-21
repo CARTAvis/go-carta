@@ -2,9 +2,9 @@ package pam
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
 
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth"
 )
@@ -13,6 +13,15 @@ import (
 // avoiding a package import cycle with pamwrap.
 type loginAuthenticator interface {
 	AuthenticateCredentials(ctx context.Context, username, password string) (*auth.User, error)
+}
+
+func redirectToLoginWithError(w http.ResponseWriter, r *http.Request, message string) {
+	v := url.Values{}
+	if redirectParams := r.URL.Query().Get("redirectParams"); redirectParams != "" {
+		v.Set("redirectParams", redirectParams)
+	}
+	v.Set("error", message)
+	http.Redirect(w, r, "/login?"+v.Encode(), http.StatusFound)
 }
 
 func NewLoginHandler(p loginAuthenticator) http.Handler {
@@ -24,11 +33,7 @@ func NewLoginHandler(p loginAuthenticator) http.Handler {
 		switch r.Method {
 		case http.MethodPost:
 			if err := r.ParseForm(); err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				if err := json.NewEncoder(w).Encode(map[string]string{"error": "Bad form"}); err != nil {
-					slog.Error("Failed to encode bad form response", "error", err)
-				}
+				redirectToLoginWithError(w, r, "Invalid login request")
 				return
 			}
 
@@ -36,22 +41,14 @@ func NewLoginHandler(p loginAuthenticator) http.Handler {
 			password := r.Form.Get("password")
 
 			if username == "" || password == "" {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				if err := json.NewEncoder(w).Encode(map[string]string{"error": "Missing username or password"}); err != nil {
-					slog.Error("Failed to encode missing credentials response", "error", err)
-				}
+				redirectToLoginWithError(w, r, "Please enter both username and password")
 				return
 			}
 
 			user, err := p.AuthenticateCredentials(r.Context(), username, password)
 			if err != nil {
 				slog.Error("PAM login failed", "username", username, "error", err)
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnauthorized)
-				if err := json.NewEncoder(w).Encode(map[string]string{"error": "Invalid credentials"}); err != nil {
-					slog.Error("Failed to encode invalid credentials response", "error", err)
-				}
+				redirectToLoginWithError(w, r, "Invalid username or password")
 				return
 			}
 			slog.Info("About to set PAM session cookie", "username", user.Username)
