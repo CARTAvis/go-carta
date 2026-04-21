@@ -213,7 +213,7 @@ func main() {
 			"apiAddress":          cfg.Controller.ApiPrefix,
 			"tokenRefreshAddress": "/api/auth/refresh",
 			"loginAddress":        authLoginAddress,
-			"serviceRestartable":  true,
+			"serviceRestartable":  false,
 		}
 		if cfg.Controller.AuthMode != config.AuthNone {
 			configResponse["logoutAddress"] = "/api/auth/logout"
