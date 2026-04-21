@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/CARTAvis/go-carta/pkg/config"
@@ -34,6 +35,12 @@ var (
 )
 
 func InitJWT(cfg config.TokenConfig) error {
+	issuer := strings.TrimSpace(cfg.Issuer)
+	if issuer == "" {
+		return fmt.Errorf("invalid controller.token_config.issuer: must be non-empty")
+	}
+	cfg.Issuer = issuer
+
 	tokenConfig = cfg
 
 	var err error
@@ -126,6 +133,12 @@ func VerifyToken(tokenString string) (*TokenClaims, error) {
 	}
 
 	if claims, ok := token.Claims.(*TokenClaims); ok && token.Valid {
+		if tokenConfig.Issuer == "" {
+			return nil, fmt.Errorf("token issuer validation misconfigured")
+		}
+		if claims.Issuer == "" || claims.Issuer != tokenConfig.Issuer {
+			return nil, fmt.Errorf("invalid token issuer")
+		}
 		return claims, nil
 	}
 
