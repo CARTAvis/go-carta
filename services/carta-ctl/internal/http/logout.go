@@ -28,7 +28,7 @@ func LogoutHandler(cfg *config.Config) http.HandlerFunc {
 			http.SetCookie(w, &http.Cookie{
 				Name:     name,
 				Value:    "",
-				Path:     "/logout",
+				Path:     "/api/auth/logout",
 				MaxAge:   -1,
 				Expires:  time.Unix(0, 0),
 				HttpOnly: true,

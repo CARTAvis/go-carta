@@ -301,12 +301,12 @@ func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Store raw ID token and logout endpoint cookies for logout flow
-	// Restrict both cookies to /logout path for security
+	// Store raw ID token and logout endpoint cookies for logout flow.
+	// Restrict both cookies to /api/auth/logout path for security.
 	http.SetCookie(w, &http.Cookie{
 		Name:     "oidc_id_token",
 		Value:    rawIDToken,
-		Path:     "/logout",
+		Path:     "/api/auth/logout",
 		HttpOnly: true,
 		Secure:   false,
 		SameSite: http.SameSiteLaxMode,
@@ -314,7 +314,7 @@ func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Reque
 	http.SetCookie(w, &http.Cookie{
 		Name:     "oidc_logout_endpoint",
 		Value:    logoutEndpoint,
-		Path:     "/logout",
+		Path:     "/api/auth/logout",
 		HttpOnly: true,
 		Secure:   false,
 		SameSite: http.SameSiteLaxMode,

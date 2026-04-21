@@ -199,7 +199,7 @@ func main() {
 	// Token refresh endpoint remains open to refresh cookies only.
 	http.Handle("/api/auth/refresh", ctlhttp.NoCache(http.HandlerFunc(ctlhttp.RefreshHandler)))
 	// Logout endpoint clears the refresh cookie and redirects to login.
-	http.Handle("/logout", ctlhttp.NoCache(ctlhttp.LogoutHandler(cfg)))
+	http.Handle("/api/auth/logout", ctlhttp.NoCache(ctlhttp.LogoutHandler(cfg)))
 
 	// Require access tokens on all other /api/ requests.
 	http.Handle("/api/", ctlhttp.NoCache(ctlhttp.WithAccessToken(http.NotFoundHandler())))
@@ -216,14 +216,14 @@ func main() {
 			"serviceRestartable":  true,
 		}
 		if cfg.Controller.AuthMode != config.AuthNone {
-			configResponse["logoutAddress"] = "/logout"
+			configResponse["logoutAddress"] = "/api/auth/logout"
 		}
 
 		if err := json.NewEncoder(w).Encode(configResponse); err != nil {
 			slog.Error("Error encoding config", "err", err)
 		}
 	}
-	http.Handle("/config", http.HandlerFunc(cfgHandler))
+	http.Handle("/config", ctlhttp.NoCache(http.HandlerFunc(cfgHandler)))
 
 	addr := fmt.Sprintf("%s:%d", cfg.Controller.Hostname, cfg.Controller.Port)
 
