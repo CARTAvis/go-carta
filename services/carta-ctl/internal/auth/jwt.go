@@ -25,13 +25,26 @@ type TokenClaims struct {
 }
 
 var (
-	privateKey  *rsa.PrivateKey
-	publicKey   *rsa.PublicKey
-	tokenConfig config.TokenConfig
+	privateKey         *rsa.PrivateKey
+	publicKey          *rsa.PublicKey
+	tokenConfig        config.TokenConfig
+	accessTokenAgeDur  time.Duration
+	refreshTokenAgeDur time.Duration
 )
 
 func InitJWT(cfg config.TokenConfig) error {
 	tokenConfig = cfg
+
+	var err error
+	accessTokenAgeDur, err = parseDurationStrict("access_token_age", cfg.AccessTokenAge)
+	if err != nil {
+		return err
+	}
+
+	refreshTokenAgeDur, err = parseDurationStrict("refresh_token_age", cfg.RefreshTokenAge)
+	if err != nil {
+		return err
+	}
 
 	privKeyData, err := os.ReadFile(cfg.PrivateKeyLocation)
 	if err != nil {
@@ -64,13 +77,13 @@ func GenerateToken(username string, tokenType TokenType) (string, error) {
 		Type:     tokenType,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    tokenConfig.Issuer,
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(parseDuration(tokenConfig.AccessTokenAge))),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(accessTokenAgeDur)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	}
 
 	if tokenType == TokenTypeRefresh {
-		claims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(parseDuration(tokenConfig.RefreshTokenAge)))
+		claims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(refreshTokenAgeDur))
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
@@ -115,15 +128,17 @@ func VerifyToken(tokenString string) (*TokenClaims, error) {
 	return nil, fmt.Errorf("invalid token")
 }
 
-func parseDuration(s string) time.Duration {
+func parseDurationStrict(name, s string) (time.Duration, error) {
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		// Default to 1 hour
-		return time.Hour
+		return 0, fmt.Errorf("invalid controller.token_config.%s %q: %w", name, s, err)
 	}
-	return d
+	if d <= 0 {
+		return 0, fmt.Errorf("invalid controller.token_config.%s %q: duration must be > 0", name, s)
+	}
+	return d, nil
 }
 
 func GetAccessTokenAgeSeconds() int {
-	return int(parseDuration(tokenConfig.AccessTokenAge).Seconds())
+	return int(accessTokenAgeDur.Seconds())
 }
