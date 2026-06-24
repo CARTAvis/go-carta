@@ -106,6 +106,7 @@ var messageTypeMap = map[cartaDefinitions.EventType]func() proto.Message{
 	cartaDefinitions.EventType_START_ANIMATION:               func() proto.Message { return &cartaDefinitions.StartAnimation{} },
 	cartaDefinitions.EventType_STOP_ANIMATION:                func() proto.Message { return &cartaDefinitions.StopAnimation{} },
 	cartaDefinitions.EventType_ANIMATION_FLOW_CONTROL:        func() proto.Message { return &cartaDefinitions.AnimationFlowControl{} },
+	cartaDefinitions.EventType_CHANNEL_MAP_FLOW_CONTROL:      func() proto.Message { return &cartaDefinitions.ChannelMapFlowControl{} },
 	cartaDefinitions.EventType_OPEN_CATALOG_FILE:             func() proto.Message { return &cartaDefinitions.OpenCatalogFile{} },
 	cartaDefinitions.EventType_CLOSE_CATALOG_FILE:            func() proto.Message { return &cartaDefinitions.CloseCatalogFile{} },
 	cartaDefinitions.EventType_CATALOG_FILTER_REQUEST:        func() proto.Message { return &cartaDefinitions.CatalogFilterRequest{} },

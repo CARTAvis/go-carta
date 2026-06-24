@@ -41,6 +41,12 @@ type Session struct {
 	fileMap      map[int32]*SessionWorker
 	sharedWorker *SessionWorker
 
+	// pvPreviewToFile maps a frontend-allocated PV preview id to the file_id whose
+	// backend serves it, so STOP_PV_PREVIEW / CLOSE_PV_PREVIEW (which carry only
+	// the preview id) can be routed to that backend. Guarded by pvPreviewMu.
+	pvPreviewMu     sync.Mutex
+	pvPreviewToFile map[int32]int32
+
 	// serverFeatures to add to an incoming REGISTER_VIEWER_ACK before it reaches the client.
 	serverFeatures uint32
 }
@@ -52,6 +58,9 @@ var handlerMap = map[cartaDefinitions.EventType]func(*Session, cartaDefinitions.
 	cartaDefinitions.EventType_EMPTY_EVENT:        (*Session).handleStatusMessage,
 	cartaDefinitions.EventType_BULK_SET_REGION:    (*Session).handleBulkSetRegion,
 	cartaDefinitions.EventType_BULK_REMOVE_REGION: (*Session).handleBulkRemoveRegion,
+	cartaDefinitions.EventType_PV_REQUEST:         (*Session).handlePvRequest,
+	cartaDefinitions.EventType_STOP_PV_PREVIEW:    (*Session).handleStopPvPreview,
+	cartaDefinitions.EventType_CLOSE_PV_PREVIEW:   (*Session).handleClosePvPreview,
 }
 
 func NewSession(conn *websocket.Conn, workerAddr string, user *auth.User, serverFeatures uint32) *Session {

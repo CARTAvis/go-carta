@@ -50,6 +50,7 @@ func (s *Session) shutdownFileWorker(fileId int32) {
 		return
 	}
 
+	s.deletePvPreviewsForFile(fileId)
 	worker.disconnect() // closes done + the WS conn; read loop exits -> failAllPending
 	if worker.workerId != "" {
 		if err := spawnerHelpers.RequestWorkerShutdown(worker.workerId, s.SpawnerAddress); err != nil {
