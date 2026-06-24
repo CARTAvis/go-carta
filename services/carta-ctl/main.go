@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -25,13 +26,12 @@ import (
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth/pamwrap"
 
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/database"
-
-	"encoding/json"
 )
 
 var (
-	runtimeSpawnerAddress string
-	pamAuth               pamwrap.Authenticator
+	runtimeSpawnerAddress       string
+	runtimeServerFeatureOverlay uint32
+	pamAuth                     pamwrap.Authenticator
 )
 
 var upgrader = websocket.Upgrader{
@@ -93,7 +93,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	user, _ := r.Context().Value(session.UserContextKey).(*auth.User)
 
-	s := session.NewSession(c, runtimeSpawnerAddress, user)
+	s := session.NewSession(c, runtimeSpawnerAddress, user, runtimeServerFeatureOverlay)
 	slog.Info("Created new session", "user", user)
 
 	// Send messages back to client through websocket
@@ -304,6 +304,12 @@ func main() {
 	if runtimeSpawnerAddress == "" {
 		runtimeSpawnerAddress = fmt.Sprintf("http://%s:%d", cfg.Spawner.Hostname, cfg.Spawner.Port)
 	}
+
+	runtimeServerFeatureOverlay = session.ComputeServerFeatures(
+		cfg.Controller.MultiSite,
+		cfg.Controller.SingleTenantBackend,
+	)
+	slog.Info("Server feature overlay", "multiSite", cfg.Controller.MultiSite, "singleTenantBackend", cfg.Controller.SingleTenantBackend)
 
 	var authenticator auth.Authenticator
 

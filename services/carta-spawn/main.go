@@ -42,18 +42,20 @@ func main() {
 	pflag.String("base_dir", "", "Starting directory for data")
 	pflag.String("top_level_dir", "", "Top-level directory for data")
 	pflag.Int("timeout", 5, "Spawn timeout in seconds")
+	pflag.Bool("run_as_current_user", false, "Launch the worker directly as the spawner's own user instead of sudo-ing to the requested user")
 	pflag.String("override", "", "Override simple config values (string, int, bool) as comma-separated key:value pairs (e.g., spawner.port:9000,log_level:debug)")
 
 	pflag.Parse()
 
 	config.BindFlags(map[string]string{
-		"log_level":     "log_level",
-		"port":          "spawner.port",
-		"hostname":      "spawner.hostname",
-		"worker_exec":   "spawner.worker_exec",
-		"timeout":       "spawner.timeout",
-		"base_dir":      "spawner.base_dir",
-		"top_level_dir": "spawner.top_level_dir",
+		"log_level":           "log_level",
+		"port":                "spawner.port",
+		"hostname":            "spawner.hostname",
+		"worker_exec":         "spawner.worker_exec",
+		"timeout":             "spawner.timeout",
+		"base_dir":            "spawner.base_dir",
+		"top_level_dir":       "spawner.top_level_dir",
+		"run_as_current_user": "spawner.run_as_current_user",
 	})
 
 	cfg := config.Load(pflag.Lookup("config").Value.String(), pflag.Lookup("override").Value.String())
@@ -86,7 +88,7 @@ func main() {
 
 		slog.Info("Process started", "username", reqBody.Username)
 
-		cmd, port, err := processHelpers.SpawnWorker(ctx, cfg.Spawner.WorkerExec, cfg.Spawner.Timeout, reqBody.Username, cfg.Spawner.BaseDirTmpl, cfg.Spawner.TopLevelDir)
+		cmd, port, err := processHelpers.SpawnWorker(ctx, cfg.Spawner.WorkerExec, cfg.Spawner.Timeout, reqBody.Username, cfg.Spawner.BaseDirTmpl, cfg.Spawner.TopLevelDir, cfg.Spawner.RunAsCurrentUser)
 		spawnerDuration := time.Since(startTime)
 		if err != nil {
 			slog.Error("Error spawning worker on free port", "error", err)
@@ -100,8 +102,7 @@ func main() {
 		testWorkerDuration := time.Since(startTime)
 		if err != nil {
 			slog.Error("Error connecting to worker", "error", err)
-			err := cmd.Process.Kill()
-			if err != nil {
+			if err := processHelpers.KillWorker(cmd); err != nil {
 				slog.Error("Error killing worker", "error", err)
 			}
 			httpHelpers.WriteError(w, http.StatusInternalServerError, "Error connecting to worker")
@@ -191,7 +192,7 @@ func main() {
 		}
 
 		start := time.Now()
-		err := info.Process.Process.Kill()
+		err := processHelpers.KillWorker(info.Process)
 		elapsed := time.Since(start)
 
 		if err != nil {
@@ -226,7 +227,7 @@ func main() {
 		// If the worker is not running, skip it
 		if w.Process != nil && w.Process.Process != nil {
 			// First try a graceful shutdown
-			err := w.Process.Process.Signal(syscall.SIGTERM)
+			err := processHelpers.SignalWorker(w.Process, syscall.SIGTERM)
 			if err != nil {
 				slog.Error("Error sending SIGTERM to process", "error", err)
 				continue
@@ -241,7 +242,7 @@ func main() {
 				slog.Info("process exited", "error", err)
 			case <-time.After(5 * time.Second):
 				slog.Info("timeout, force killing")
-				if err := w.Process.Process.Kill(); err != nil {
+				if err := processHelpers.KillWorker(w.Process); err != nil {
 					slog.Error("Error force killing process", "error", err)
 				}
 				<-done // wait again to reap zombie

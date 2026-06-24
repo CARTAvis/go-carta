@@ -31,18 +31,15 @@ func (s *Session) handleOpenFile(_ cartaDefinitions.EventType, requestId uint32,
 	}
 
 	fileWorker := &SessionWorker{
-		requestId:      requestId,
-		fileRequest:    &payload,
-		conn:           workerConn,
-		clientSendChan: s.clientSendChan,
+		requestId:   requestId,
+		fileRequest: &payload,
+		conn:        workerConn,
+		workerId:    info.WorkerId,
+		owner:       s,
 	}
 	fileWorker.handleInit()
 
-	if s.fileMap == nil {
-		s.fileMap = make(map[int32]*SessionWorker)
-	}
-
-	s.fileMap[payload.FileId] = fileWorker
+	s.setFileWorker(payload.FileId, fileWorker)
 
 	// We  need to first pass through a register viewer message, and then wait for the ack before sending through the open file message
 	// File opening is handled by workerMessageHandler

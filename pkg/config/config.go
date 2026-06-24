@@ -35,24 +35,27 @@ type PAMConfig struct {
 }
 
 type ControllerConfig struct {
-	OIDC               OIDCConfig `mapstructure:"oidc"`
-	PAM                PAMConfig  `mapstructure:"pam"`
-	Port               int        `mapstructure:"port"`
-	Hostname           string     `mapstructure:"hostname"`
-	FrontendDir        string     `mapstructure:"frontend_dir"`
-	SpawnerAddress     string     `mapstructure:"spawner_address"`
-	AuthMode           AuthMode   `mapstructure:"auth_mode"`
-	DBConnectionString string     `mapstructure:"db_conn_string"`
-	ApiPrefix          string     `mapstructure:"api_prefix"`
+	OIDC                OIDCConfig `mapstructure:"oidc"`
+	PAM                 PAMConfig  `mapstructure:"pam"`
+	Port                int        `mapstructure:"port"`
+	Hostname            string     `mapstructure:"hostname"`
+	FrontendDir         string     `mapstructure:"frontend_dir"`
+	SpawnerAddress      string     `mapstructure:"spawner_address"`
+	AuthMode            AuthMode   `mapstructure:"auth_mode"`
+	DBConnectionString  string     `mapstructure:"db_conn_string"`
+	ApiPrefix           string     `mapstructure:"api_prefix"`
+	MultiSite           bool       `mapstructure:"multi_site"`
+	SingleTenantBackend bool       `mapstructure:"single_tenant_backend"`
 }
 
 type SpawnerConfig struct {
-	WorkerExec  string        `mapstructure:"worker_exec"`
-	Timeout     time.Duration `mapstructure:"timeout"`
-	Port        int           `mapstructure:"port"`
-	Hostname    string        `mapstructure:"hostname"`
-	BaseDirTmpl string        `mapstructure:"base_dir_tmpl"`
-	TopLevelDir string        `mapstructure:"top_level_dir"`
+	WorkerExec       string        `mapstructure:"worker_exec"`
+	Timeout          time.Duration `mapstructure:"timeout"`
+	Port             int           `mapstructure:"port"`
+	Hostname         string        `mapstructure:"hostname"`
+	BaseDirTmpl      string        `mapstructure:"base_dir_tmpl"`
+	TopLevelDir      string        `mapstructure:"top_level_dir"`
+	RunAsCurrentUser bool          `mapstructure:"run_as_current_user"`
 }
 
 // Config holds common configuration values shared across all services
@@ -79,6 +82,8 @@ func setControllerDefaults(v *viper.Viper) {
 	v.SetDefault("controller.oidc.redirect_url", "")
 	v.SetDefault("controller.db_conn_string", "")
 	v.SetDefault("controller.api_prefix", "/api")
+	v.SetDefault("controller.multi_site", false)
+	v.SetDefault("controller.single_tenant_backend", true)
 
 }
 
@@ -89,6 +94,7 @@ func setSpawnerDefaults(v *viper.Viper) {
 	v.SetDefault("spawner.hostname", "")
 	v.SetDefault("spawner.base_dir_tmpl", "{{.home}}")
 	v.SetDefault("spawner.top_level_dir", "")
+	v.SetDefault("spawner.run_as_current_user", false)
 }
 
 func setDefaults(v *viper.Viper) {

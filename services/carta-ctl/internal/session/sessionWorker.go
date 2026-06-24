@@ -3,6 +3,8 @@ package session
 import (
 	"fmt"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/protobuf/proto"
@@ -13,11 +15,31 @@ import (
 )
 
 type SessionWorker struct {
-	fileRequest    *cartaDefinitions.OpenFile
-	requestId      uint32
-	conn           *websocket.Conn
-	sendChan       chan []byte
-	clientSendChan chan []byte
+	fileRequest *cartaDefinitions.OpenFile
+	requestId   uint32
+	conn        *websocket.Conn
+	sendChan    chan []byte
+
+	// done is closed once (via doneOnce) when the worker is torn down. Senders
+	// and the sendHandler goroutine select on it instead of relying on sendChan
+	// being closed, so a send can never race a close (send-on-closed panic).
+	done     chan struct{}
+	doneOnce sync.Once
+
+	// workerId is the spawner's id for the backend process this worker proxies.
+	// Retained so the backend can be reaped (RequestWorkerShutdown) on CLOSE_FILE
+	// or client disconnect. Empty if unknown.
+	workerId string
+
+	// owner is the Session this worker belongs to (set at construction). Used to
+	// reach session-level helpers such as server-feature-flag injection.
+	owner *Session
+
+	// Controller-originated request/stream correlation. pending maps a
+	// controller-allocated requestId (high bit set) to its waiting consumer.
+	reqMu      sync.Mutex
+	pending    map[uint32]*pendingRequest
+	reqCounter atomic.Uint32
 }
 
 func (sw *SessionWorker) proxyMessageToWorker(msg proto.Message, eventType cartaDefinitions.EventType, requestId uint32) error {
@@ -27,8 +49,23 @@ func (sw *SessionWorker) proxyMessageToWorker(msg proto.Message, eventType carta
 	}
 
 	slog.Debug("Proxying message from session to worker", "eventType", eventType)
-	sw.sendChan <- byteData
+	if !sw.enqueue(byteData) {
+		return fmt.Errorf("worker is shutting down")
+	}
 	return nil
+}
+
+// enqueue hands a framed message to the sendHandler, or returns false if the
+// worker is being torn down. Selecting on done means the send can never panic
+// on a closed sendChan (sendChan is never closed). A nil done (in unit tests
+// that build a worker by hand) is never ready, so the send proceeds.
+func (sw *SessionWorker) enqueue(byteData []byte) bool {
+	select {
+	case sw.sendChan <- byteData:
+		return true
+	case <-sw.done:
+		return false
+	}
 }
 
 func (sw *SessionWorker) workerMessageHandler() {
@@ -78,23 +115,38 @@ func (sw *SessionWorker) workerMessageHandler() {
 
 			slog.Debug("Received message from worker", "eventType", prefix.EventType, "workerName", workerName, "hasFileRequest", sw.fileRequest != nil)
 
+			// Controller-originated request/stream responses go to their
+			// waiting channel and are not forwarded to the client.
+			if sw.deliverToPending(prefix.RequestId, prefix.EventType, message[8:]) {
+				return
+			}
+
 			if sw.fileRequest != nil && prefix.EventType == cartaDefinitions.EventType_REGISTER_VIEWER_ACK {
 				slog.Debug("Proxying OPEN_FILE message to worker after REGISTER_VIEWER_ACK", "workerName", workerName)
-				err = sw.proxyMessageToWorker(sw.fileRequest, cartaDefinitions.EventType_OPEN_FILE, sw.requestId)
-				if err != nil {
+				if err := sw.proxyMessageToWorker(sw.fileRequest, cartaDefinitions.EventType_OPEN_FILE, sw.requestId); err != nil {
 					slog.Error("Error proxying open file message to worker", "error", err)
 				}
-			} else {
-				// TODO: We will often need to adjust responses here
-				// Pass the incoming message along to the client
-				sw.clientSendChan <- message
+				return
 			}
+
+			if sw.fileRequest == nil && prefix.EventType == cartaDefinitions.EventType_REGISTER_VIEWER_ACK {
+				sw.owner.forwardRegisterViewerAck(prefix.RequestId, message[8:])
+				return
+			}
+
+			// Pass the incoming message along to the client
+			sw.owner.sendToClient(message)
 		}()
 	}
+
+	// The backend connection has dropped; release any in-flight controller
+	// requests so their consumers don't block forever.
+	sw.failAllPending()
 }
 
 func (sw *SessionWorker) handleInit() {
 	sw.sendChan = make(chan []byte, 100)
+	sw.done = make(chan struct{})
 	// Start up the message sender and proxy handler
 	var workerName string
 	if sw.fileRequest != nil {
@@ -103,15 +155,20 @@ func (sw *SessionWorker) handleInit() {
 		workerName = "shared-worker"
 	}
 
-	go sendHandler(sw.sendChan, sw.conn, workerName)
+	go sendHandler(sw.sendChan, sw.done, sw.conn, workerName)
 	go sw.workerMessageHandler()
 }
 
+// disconnect signals teardown (closing done releases the sendHandler and any
+// blocked senders) and closes the backend connection. sendChan is intentionally
+// never closed, so a concurrent enqueue cannot panic. Idempotent via doneOnce.
 func (sw *SessionWorker) disconnect() {
+	sw.doneOnce.Do(func() {
+		if sw.done != nil {
+			close(sw.done)
+		}
+	})
 	if sw.conn != nil {
 		helpers.CloseOrLog(sw.conn)
-	}
-	if sw.sendChan != nil {
-		close(sw.sendChan)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -40,10 +41,20 @@ func parsePortFromLine(line string) (int, bool) {
 // it is listening ("server listening at ..."). The worker is started with
 // -port=0 so the OS selects a free port, and the detected port from the log is
 // returned.
-func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Duration, username string, baseDirTmpl string, topLevelDir string) (*exec.Cmd, int, error) {
-	user, err := user.Lookup(username)
+func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Duration, username string, baseDirTmpl string, topLevelDir string, runAsCurrentUser bool) (*exec.Cmd, int, error) {
+	// runAsCurrentUser launches the worker directly as the process owner (no
+	// sudo); otherwise it sudo's to the requested OS account. In the current-user
+	// case the requested username need not be a real OS account, so resolve the
+	// home directory (for base_dir_tmpl) from the running user instead.
+	var usr *user.User
+	var err error
+	if runAsCurrentUser {
+		usr, err = user.Current()
+	} else {
+		usr, err = user.Lookup(username)
+	}
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to lookup user %s: %w", username, err)
+		return nil, 0, fmt.Errorf("failed to look up user %s: %w", username, err)
 	}
 
 	args := []string{"--debug_no_auth"}
@@ -59,7 +70,7 @@ func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Du
 	}
 
 	// Adding as a positional argument so startup folder should be last option
-	if strings.Contains(baseDirTmpl, "{{.home}}") && user.HomeDir == "" {
+	if strings.Contains(baseDirTmpl, "{{.home}}") && usr.HomeDir == "" {
 		slog.Warn("base_dir_tmpl references {{.home}} but user has no home directory. Omitting starting directory", "username", username)
 	} else if baseDirTmpl != "" {
 		var buf bytes.Buffer
@@ -70,7 +81,7 @@ func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Du
 
 		err = tmpl.Execute(&buf, map[string]string{
 			"user": username,
-			"home": user.HomeDir,
+			"home": usr.HomeDir,
 		})
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to execute base_dir_tmpl: %w", err)
@@ -87,9 +98,20 @@ func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Du
 		}
 	}
 
-	slog.Info("Spawning worker process", "workerPath", workerPath, "username", username, "args", args)
+	slog.Info("Spawning worker process", "workerPath", workerPath, "username", username, "runAsCurrentUser", runAsCurrentUser, "args", args)
 
-	cmd := exec.CommandContext(ctx, "sudo", append([]string{"-u", username, workerPath}, args...)...)
+	var cmd *exec.Cmd
+	if runAsCurrentUser {
+		cmd = exec.CommandContext(ctx, workerPath, args...)
+	} else {
+		cmd = exec.CommandContext(ctx, "sudo", append([]string{"-u", username, workerPath}, args...)...)
+	}
+
+	// Put the worker in its own process group. In the sudo case cmd.Process is
+	// the sudo wrapper, not the backend; killing only that PID would orphan the
+	// backend. With a dedicated group, KillWorker can signal the whole group so
+	// the backend is actually reaped.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// Capture stdout/stderr so we can watch for the readiness log while still
 	// forwarding output to the parent process' stdio.
@@ -153,10 +175,26 @@ func SpawnWorker(ctx context.Context, workerPath string, timeoutDuration time.Du
 	case p := <-readyCh:
 		return cmd, p, nil
 	case <-ctxReady.Done():
-		_ = cmd.Process.Kill()
+		_ = KillWorker(cmd)
 		_ = cmd.Wait()
 		return nil, 0, fmt.Errorf("worker did not become ready in time: %w", ctxReady.Err())
 	}
+}
+
+// SignalWorker sends sig to the worker's whole process group. Workers are
+// spawned with Setpgid, so the group id equals the spawned process' PID; in the
+// sudo case this reaches the backend, not just the sudo wrapper (which would
+// otherwise be orphaned). Returns an error if the worker has no live process.
+func SignalWorker(cmd *exec.Cmd, sig syscall.Signal) error {
+	if cmd == nil || cmd.Process == nil {
+		return fmt.Errorf("worker has no process")
+	}
+	return syscall.Kill(-cmd.Process.Pid, sig)
+}
+
+// KillWorker force-kills the worker's process group (SIGKILL).
+func KillWorker(cmd *exec.Cmd) error {
+	return SignalWorker(cmd, syscall.SIGKILL)
 }
 
 func TestWorker(ctx context.Context, port int, timeoutDuration time.Duration) error {

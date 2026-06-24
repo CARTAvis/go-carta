@@ -11,16 +11,20 @@ import (
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/spawnerHelpers"
 )
 
-func sendHandler(channel <-chan []byte, conn *websocket.Conn, name string) {
+func sendHandler(channel <-chan []byte, done <-chan struct{}, conn *websocket.Conn, name string) {
 	slog.Debug("Starting send handler", "name", name, "channel", fmt.Sprintf("%p", channel))
-	for byteData := range channel {
-		err := conn.WriteMessage(websocket.BinaryMessage, byteData)
-		if err != nil {
-			slog.Error("Error sending message", "name", name, "channel", fmt.Sprintf("%p", channel), "error", err)
-			// Continue processing other messages even if one fails
+	for {
+		select {
+		case byteData := <-channel:
+			if err := conn.WriteMessage(websocket.BinaryMessage, byteData); err != nil {
+				slog.Error("Error sending message", "name", name, "channel", fmt.Sprintf("%p", channel), "error", err)
+				// Continue processing other messages even if one fails
+			}
+		case <-done:
+			slog.Debug("Send handler exiting", "name", name)
+			return
 		}
 	}
-	slog.Debug("Send handler exiting", "name", name)
 }
 
 // handleProxiedMessage proxies unhandled messages to the appropriate worker.
@@ -35,9 +39,9 @@ func (s *Session) handleProxiedMessage(eventType cartaDefinitions.EventType, req
 	var targetWorker *SessionWorker
 	var workerName string
 
-	if hasFileId && s.fileMap != nil {
+	if hasFileId {
 		// Check if we have a worker for this fileId
-		if worker, exists := s.fileMap[fileId]; exists {
+		if worker, exists := s.getFileWorker(fileId); exists {
 			targetWorker = worker
 			workerName = fmt.Sprintf("worker:%d", fileId)
 		} else {
@@ -57,7 +61,9 @@ func (s *Session) handleProxiedMessage(eventType cartaDefinitions.EventType, req
 		return fmt.Errorf("no worker available to handle message")
 	}
 
-	targetWorker.sendChan <- messageBytes
+	if !targetWorker.enqueue(messageBytes) {
+		return fmt.Errorf("worker %s is shutting down", workerName)
+	}
 	return nil
 }
 

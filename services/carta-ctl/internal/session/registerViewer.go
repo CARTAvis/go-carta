@@ -38,9 +38,10 @@ func (s *Session) handleRegisterViewerMessage(_ cartaDefinitions.EventType, requ
 	}
 
 	s.sharedWorker = &SessionWorker{
-		conn:           workerConn,
-		clientSendChan: s.clientSendChan,
-		fileRequest:    nil,
+		conn:        workerConn,
+		fileRequest: nil,
+		workerId:    info.WorkerId,
+		owner:       s,
 	}
 	s.sharedWorker.handleInit()
 	return s.sharedWorker.proxyMessageToWorker(&payload, cartaDefinitions.EventType_REGISTER_VIEWER, requestId)

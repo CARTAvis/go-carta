@@ -43,6 +43,13 @@ spawner_address = "http://localhost:8080"
 # - If the controller is accessed at, e.g., http://mydomain.tld/carta/ this should then be set to "/carta/api"
 api_prefix = "/api"
 
+# Advertise that the controller can reach controller deployments at other sites
+# (enables frontend SERVER_LIST requests). Default: false.
+multi_site = false
+# Advertise that each file is served by its own backend instance (frontend then
+# manages per-file regions and spatial/spectral matching). Default: true.
+single_tenant_backend = true
+
 # ----------------------------------------------------------------------------
 # PAM Authentication Configuration (when auth_mode = "pam" or "both")
 # ----------------------------------------------------------------------------
@@ -93,3 +100,10 @@ base_dir_tmpl = "{{.home}}"
 
 # Top level directory for user data access
 top_level_dir = "/"
+
+# Launch the backend directly as the user running the spawner, instead of
+# sudo-ing to the requested user. Use this for single-user/local deployments
+# where the spawner is not run as root. When true the requested username need
+# not be a real OS account; {{.home}} resolves to the spawner user's home.
+# Default: false.
+run_as_current_user = false
