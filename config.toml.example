@@ -44,6 +44,28 @@ spawner_address = "http://localhost:8080"
 api_prefix = "/api"
 
 # ----------------------------------------------------------------------------
+# Login Page Configuration
+# ----------------------------------------------------------------------------
+[controller.login_page]
+
+# Title displayed alongside the CARTA logo on the login page
+title = "CARTA"
+
+# Welcome / instruction text shown below the logo
+welcome_text = "Welcome to the CARTA server."
+
+# Path to an optional site banner image displayed at the top of the login page.
+# Leave empty for no banner.
+site_banner = ""
+
+# Optional support text shown at the bottom of the login page.
+# The value is sanitized server-side: only <a> tags are allowed.
+# Allowed href schemes are: https, http, and mailto.
+# All other tags/attributes are removed.
+# Example: 'If you have problems, please contact <a href="mailto:support@example.org">support</a>.'
+support_text = ""
+
+# ----------------------------------------------------------------------------
 # PAM Authentication Configuration (when auth_mode = "pam" or "both")
 # ----------------------------------------------------------------------------
 [controller.pam]
@@ -66,7 +88,34 @@ client_id = ""
 client_secret = ""
 
 # OIDC redirect/callback URL
+# Example: "http://localhost:8081/api/auth/oidc_callback"
 redirect_url = ""
+
+# Public application URL used for OIDC logout redirects after sign-out.
+# Example: "http://localhost:8081/login"
+app_url = ""
+
+# ----------------------------------------------------------------------------
+# JWT Token Configuration
+# ----------------------------------------------------------------------------
+[controller.token_config]
+
+# PEM-encoded private key used to sign CARTA JWTs.
+# Defaults to /etc/carta/carta_private.pem if omitted.
+private_key_location = "/etc/carta/carta_private.pem"
+
+# PEM-encoded public key used to verify CARTA JWTs.
+# Defaults to /etc/carta/carta_public.pem if omitted.
+public_key_location = "/etc/carta/carta_public.pem"
+
+# Issuer claim written into generated CARTA JWTs.
+issuer = "carta-ctl"
+
+# Lifetime of short-lived access tokens.
+access_token_age = "10m"
+
+# Lifetime of refresh tokens.
+refresh_token_age = "24h"
 
 # ============================================================================
 # Spawner Configuration
