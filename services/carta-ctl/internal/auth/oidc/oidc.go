@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
@@ -239,7 +240,7 @@ func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Reque
 
 	state := r.URL.Query().Get("state")
 	stateCookie, err := r.Cookie("oidc_state")
-	if err != nil || state == "" || state != stateCookie.Value {
+	if err != nil || state == "" || subtle.ConstantTimeCompare([]byte(state), []byte(stateCookie.Value)) != 1 {
 		slog.Error("OIDC: invalid state", "error", err)
 		http.Error(w, "Invalid state", http.StatusBadRequest)
 		return

@@ -7,10 +7,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 
 	"github.com/CARTAvis/go-carta/pkg/config"
-	xhtml "golang.org/x/net/html"
+	"github.com/microcosm-cc/bluemonday"
 )
 
 //go:embed templates/*.html
@@ -23,78 +22,19 @@ var loginTmpl = template.Must(
 	template.ParseFS(templates, "templates/login.html"),
 )
 
+var supportTextPolicy = func() *bluemonday.Policy {
+	p := bluemonday.UGCPolicy()
+	p.RequireParseableURLs(true)
+	p.AllowURLSchemes("https", "mailto")
+	return p
+}()
+
 func sanitizeSupportText(raw string) template.HTML {
 	if raw == "" {
 		return ""
 	}
 
-	var b strings.Builder
-	z := xhtml.NewTokenizer(strings.NewReader(raw))
-
-	for {
-		tt := z.Next()
-		switch tt {
-		case xhtml.ErrorToken:
-			return template.HTML(b.String())
-		case xhtml.TextToken:
-			b.WriteString(template.HTMLEscapeString(string(z.Text())))
-		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
-			tok := z.Token()
-			if tok.Data != "a" {
-				continue
-			}
-
-			href := ""
-			title := ""
-			for _, attr := range tok.Attr {
-				switch attr.Key {
-				case "href":
-					href = attr.Val
-				case "title":
-					title = attr.Val
-				}
-			}
-
-			if !isAllowedAnchorHref(href) {
-				continue
-			}
-
-			b.WriteString("<a href=\"")
-			b.WriteString(template.HTMLEscapeString(href))
-			b.WriteString("\"")
-			if title != "" {
-				b.WriteString(" title=\"")
-				b.WriteString(template.HTMLEscapeString(title))
-				b.WriteString("\"")
-			}
-			b.WriteString(">")
-		case xhtml.EndTagToken:
-			tok := z.Token()
-			if tok.Data == "a" {
-				b.WriteString("</a>")
-			}
-		}
-	}
-}
-
-func isAllowedAnchorHref(href string) bool {
-	href = strings.TrimSpace(href)
-	if href == "" {
-		return false
-	}
-
-	u, err := url.Parse(href)
-	if err != nil {
-		return false
-	}
-
-	if u.IsAbs() {
-		scheme := strings.ToLower(u.Scheme)
-		return scheme == "http" || scheme == "https" || scheme == "mailto"
-	}
-
-	// Allow relative links only when rooted to avoid ambiguous pseudo-protocol patterns.
-	return strings.HasPrefix(href, "/")
+	return template.HTML(supportTextPolicy.Sanitize(raw))
 }
 
 // LoginPageData holds all the data needed to render the login page.
