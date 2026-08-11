@@ -1,24 +1,19 @@
 package main
 
 import (
-	"context"
-	"embed"
 	"errors"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
 	"github.com/spf13/pflag"
 
 	"github.com/CARTAvis/go-carta/pkg/config"
 	helpers "github.com/CARTAvis/go-carta/pkg/shared"
-	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/session"
+	authpam "github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth/pam"
+	ctlhttp "github.com/CARTAvis/go-carta/services/carta-ctl/internal/http"
 
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth"
 	authoidc "github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth/oidc"
@@ -31,230 +26,16 @@ import (
 
 var (
 	runtimeSpawnerAddress string
-	pamAuth               pamwrap.Authenticator
 )
-
-var upgrader = websocket.Upgrader{
-	// Ignore Origin header
-	CheckOrigin: func(r *http.Request) bool {
-		slog.Debug("Upgrading WebSocket connection", "origin", r.Header.Get("Origin"))
-		return true
-	},
-}
-
-// spaHandler serves static files if they exist, otherwise falls back to index.html
-type spaHandler struct {
-	root string
-	fs   http.Handler
-}
-
-func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// We can create a sub-logger for this handler from the default handler
-	logger := slog.With("service", "spaHandler")
-	// If this is a WebSocket upgrade (e.g. ws://localhost:8081), hand it to wsHandler
-	logger.Debug("Received request", "path", r.URL.Path)
-	if websocket.IsWebSocketUpgrade(r) {
-		logger.Debug("Upgrading to WebSocket", "path", r.URL.Path)
-		wsHandler(w, r)
-		return
-	}
-
-	logger.Debug("Serving HTTP request", "path", r.URL.Path)
-	// Clean and resolve requested path
-	path := r.URL.Path
-	if path == "" || path == "/" {
-		logger.Debug("Serving root, returning index.html")
-		logger.Debug("Serving root", "path", filepath.Join(h.root, "index.html"))
-		http.ServeFile(w, r, filepath.Join(h.root, "index.html"))
-		return
-	}
-
-	// Map URL path to filesystem path
-	fullPath := filepath.Join(h.root, filepath.Clean(path))
-
-	// If the file exists and is not a directory, serve it
-	if info, err := os.Stat(fullPath); err == nil && !info.IsDir() {
-		h.fs.ServeHTTP(w, r)
-		return
-	}
-
-	// For everything else (including React routes), serve index.html
-	http.ServeFile(w, r, filepath.Join(h.root, "index.html"))
-}
-
-func wsHandler(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("Handling WebSocket connection", "remoteAddr", r.RemoteAddr)
-	c, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		slog.Error("Problem with HTTP upgrade", "error", err)
-		return
-	}
-	defer helpers.CloseOrLog(c)
-
-	user, _ := r.Context().Value(session.UserContextKey).(*auth.User)
-
-	s := session.NewSession(c, runtimeSpawnerAddress, user)
-	slog.Info("Created new session", "user", user)
-
-	// Send messages back to client through websocket
-	s.HandleConnection()
-
-	// Close worker on exit if it exists
-	defer s.HandleDisconnect()
-
-	// Basic handler based on gorilla/websocket example
-	for {
-		messageType, message, err := c.ReadMessage()
-		if err != nil {
-			slog.Error("Error reading message", "error", err)
-			break
-		}
-
-		// Ping/pong sequence
-		if messageType == websocket.TextMessage && string(message) == "PING" {
-			slog.Debug("Received PING from client, sending PONG")
-			err := c.WriteMessage(websocket.TextMessage, []byte("PONG"))
-			if err != nil {
-				slog.Error("Failed to send pong message", "error", err)
-			}
-			continue
-		}
-
-		// Ignore all other non-binary messages
-		if messageType != websocket.BinaryMessage {
-			slog.Warn("Ignoring non-binary message", "type", messageType, "message", message)
-			continue
-		}
-
-		go func() {
-			err := s.HandleMessage(message)
-			if err != nil {
-				slog.Warn("Failed to handle message", "error", err)
-			}
-		}()
-	}
-
-	// defer should shut down the worker afterwards
-	slog.Info("Client disconnected")
-}
-
-func withAuth(a auth.Authenticator, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, err := a.AuthenticateHTTP(w, r)
-		if err != nil {
-			// Expected when we just redirected to /oidc/login
-			if strings.Contains(err.Error(), "no OIDC session") {
-				// optional: log at debug level instead
-				slog.Debug("Redirecting to OIDC login")
-				return
-			}
-			slog.Error("Auth failed", "error", err)
-			return
-		}
-
-		// Attach user to context
-		ctx := context.WithValue(r.Context(), session.UserContextKey, user)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-func noCache(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate")
-		w.Header().Set("Pragma", "no-cache")
-		w.Header().Set("Expires", "0")
-		w.Header().Set("Surrogate-Control", "no-store")
-		next.ServeHTTP(w, r)
-	})
-}
-
-//go:embed templates/*.html
-var templates embed.FS
-var pamLoginTmpl *template.Template
-
-func pamLoginHandler(p pamwrap.Authenticator) http.Handler {
-	slog.Info("Setting up PAM login handler")
-
-	type pageData struct {
-		Title   string
-		Heading string
-		Error   string
-	}
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		slog.Info("Handling PAM login request", "method", r.Method)
-
-		switch r.Method {
-
-		case http.MethodGet:
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-			_ = pamLoginTmpl.Execute(w, pageData{
-				Title:   "CARTA Login",
-				Heading: "CARTA Login (PAM)",
-			})
-
-		case http.MethodPost:
-			if err := r.ParseForm(); err != nil {
-				http.Error(w, "Bad form", http.StatusBadRequest)
-				return
-			}
-
-			username := r.Form.Get("username")
-			password := r.Form.Get("password")
-
-			if username == "" || password == "" {
-				w.WriteHeader(http.StatusBadRequest)
-				_ = pamLoginTmpl.Execute(w, pageData{
-					Title:   "CARTA Login",
-					Heading: "CARTA Login (PAM)",
-					Error:   "Missing username or password",
-				})
-				return
-			}
-
-			user, err := p.AuthenticateCredentials(r.Context(), username, password)
-			if err != nil {
-				slog.Error("PAM login failed", "username", username, "error", err)
-				w.WriteHeader(http.StatusUnauthorized)
-				_ = pamLoginTmpl.Execute(w, pageData{
-					Title:   "CARTA Login",
-					Heading: "CARTA Login (PAM)",
-					Error:   "Invalid credentials",
-				})
-				return
-			}
-			slog.Info("About to set PAM session cookie", "username", user.Username)
-
-			if err := pamwrap.SetSessionCookie(w, user.Username); err != nil {
-				slog.Error("Failed to set PAM session cookie", "username", user.Username, "error", err)
-				http.Error(w, "Session error", http.StatusInternalServerError)
-				return
-			}
-
-			// Dump Set-Cookie headers to confirm what we sent
-			for _, c := range w.Header()["Set-Cookie"] {
-				slog.Info("Set-Cookie", "value", c)
-			}
-
-			slog.Info("Cookie set, redirecting", "to", "/")
-			http.Redirect(w, r, "/", http.StatusFound)
-
-			return
-
-		default:
-			slog.Warn("Ignoring unsupported method", "method", r.Method)
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-	})
-}
-
-var oidcAuth *authoidc.OIDCAuthenticator
 
 func main() {
 	logger := helpers.NewLogger("carta-ctl", "info")
 	slog.SetDefault(logger)
+
+	var (
+		pamAuth  pamwrap.Authenticator
+		oidcAuth *authoidc.OIDCAuthenticator
+	)
 
 	id := uuid.New()
 	slog.Info("Starting controller", "uuid", id.String())
@@ -296,51 +77,67 @@ func main() {
 	logger = helpers.NewLogger("carta-ctl", cfg.LogLevel)
 	slog.SetDefault(logger)
 
-	pamLoginTmpl = template.Must(
-		template.ParseFS(templates, "templates/pam_login.html"),
-	)
-
 	runtimeSpawnerAddress = cfg.Controller.SpawnerAddress
 	if runtimeSpawnerAddress == "" {
 		runtimeSpawnerAddress = fmt.Sprintf("http://%s:%d", cfg.Spawner.Hostname, cfg.Spawner.Port)
 	}
 
-	var authenticator auth.Authenticator
-
 	slog.Debug("Configuring auth", "authMode", cfg.Controller.AuthMode)
 
 	switch cfg.Controller.AuthMode {
 	case config.AuthNone:
-		authenticator = auth.NoopAuthenticator{}
+		// No authentication required - JWT not needed
 	case config.AuthPAM:
+		// Initialize JWT for token generation and verification
+		if err := auth.InitJWT(cfg.Controller.TokenConfig); err != nil {
+			slog.Error("Failed to initialize JWT for PAM authentication", "error", err)
+			os.Exit(1)
+		}
 		p, err := pamwrap.New(cfg.Controller.PAM)
 		if err != nil {
 			slog.Error("PAM is not available on this platform", "error", err)
 			os.Exit(1)
 		}
 		pamAuth = p
-		authenticator = p
 
 	case config.AuthOIDC:
-		o := authoidc.New(cfg.Controller.OIDC)
+		// Initialize JWT for token generation and verification
+		if err := auth.InitJWT(cfg.Controller.TokenConfig); err != nil {
+			slog.Error("Failed to initialize JWT for OIDC authentication", "error", err)
+			os.Exit(1)
+		}
+		o, err := authoidc.New(cfg.Controller.OIDC)
+		if err != nil {
+			slog.Error("Failed to initialize OIDC authentication", "error", err)
+			os.Exit(1)
+		}
 		oidcAuth = o
-		authenticator = o
 
 	case config.AuthBoth:
+		// Initialize JWT for token generation and verification
+		if err := auth.InitJWT(cfg.Controller.TokenConfig); err != nil {
+			slog.Error("Failed to initialize JWT for 'both' authentication mode", "error", err)
+			os.Exit(1)
+		}
 		p, err := pamwrap.New(cfg.Controller.PAM)
 		if err != nil {
 			slog.Error("Auth mode 'both' requires PAM, but PAM is not available on this platform", "error", err)
 			os.Exit(1)
 		}
 		pamAuth = p
-		authenticator = auth.Multi(
-			p,
-			authoidc.New(cfg.Controller.OIDC),
-		)
+
+		o, err := authoidc.New(cfg.Controller.OIDC)
+		if err != nil {
+			slog.Error("Auth mode 'both' requires OIDC, but failed to initialize OIDC", "error", err)
+			os.Exit(1)
+		}
+		oidcAuth = o
 	default:
 		slog.Error("Unknown config option", "authMode", cfg.Controller.AuthMode)
 		os.Exit(1)
 	}
+
+	authLoginAddress := "/login"
 
 	if cfg.Controller.DBConnectionString != "" {
 		slog.Debug("Database connection string provided")
@@ -350,8 +147,8 @@ func main() {
 		db.InitDb()
 		http.Handle(
 			"/api/database/",
-			noCache(
-				withAuth(authenticator,
+			ctlhttp.NoCache(
+				ctlhttp.WithAccessToken(
 					http.StripPrefix("/api/database", http.Handler(db.Router())))))
 	} else {
 		slog.Debug("Defaulting to backend's filesystem-based state-saving")
@@ -367,48 +164,66 @@ func main() {
 
 		slog.Info("Serving carta_frontend", "dirname", cfg.Controller.FrontendDir)
 		fs := http.FileServer(http.Dir(cfg.Controller.FrontendDir))
+		wsHandler := ctlhttp.NewWebSocketHandler(runtimeSpawnerAddress, cfg.Controller.AuthMode != config.AuthNone)
 
 		if oidcAuth != nil && (cfg.Controller.AuthMode == config.AuthOIDC || cfg.Controller.AuthMode == config.AuthBoth) {
-			http.Handle("/oidc/login", http.HandlerFunc(oidcAuth.LoginHandler))
-			http.Handle("/oidc/callback", http.HandlerFunc(oidcAuth.CallbackHandler))
+			http.Handle("/api/auth/oidc_login", http.HandlerFunc(oidcAuth.LoginHandler))
+			http.Handle("/api/auth/oidc_callback", http.HandlerFunc(oidcAuth.CallbackHandler))
+		}
+
+		if cfg.Controller.AuthMode != config.AuthNone {
+			http.Handle("/login", auth.LoginPageHandler(cfg))
+			http.Handle("/login/logo", auth.ServeCartaLogo())
+			http.Handle("/login/banner", auth.ServeSiteBanner(cfg.Controller.LoginPage.SiteBanner))
 		}
 
 		// Root handler behaves like carta_backend:
 		//  - /           -> index.html
 		//  - /static/... -> real files
 		//  - /whatever   -> index.html (for SPA routes)
-		// Wrap root with the currently-selected authenticator (PAM, OIDC, both, or none).
-		http.Handle("/", withAuth(authenticator, spaHandler{
-			root: cfg.Controller.FrontendDir,
-			fs:   fs,
-		}))
+		// The SPA itself is public; API and WebSocket upgrade paths require access tokens.
+		http.Handle("/", ctlhttp.SPAHandler{
+			Root:      cfg.Controller.FrontendDir,
+			FS:        fs,
+			WSHandler: wsHandler,
+		})
 
-		// Expose the PAM login page only when PAM is enabled.
+		// Expose the PAM login API endpoint only when PAM is enabled.
 		if pamAuth != nil && (cfg.Controller.AuthMode == config.AuthPAM || cfg.Controller.AuthMode == config.AuthBoth) {
-			http.Handle("/pam-login", pamLoginHandler(pamAuth))
+			http.Handle("/api/auth/pam_login", authpam.NewLoginHandler(pamAuth))
 		}
 	} else {
 		slog.Warn("No frontend directory specified: controller will *not* serve the frontend (only /carta WebSocket).")
 	}
+
+	// Token refresh endpoint remains open to refresh cookies only.
+	http.Handle("/api/auth/refresh", ctlhttp.NoCache(http.HandlerFunc(ctlhttp.RefreshHandler)))
+	// Logout endpoint clears the refresh cookie and redirects to login.
+	http.Handle("/api/auth/logout", ctlhttp.NoCache(ctlhttp.LogoutHandler(cfg)))
+
+	// Require access tokens on all other /api/ requests.
+	http.Handle("/api/", ctlhttp.NoCache(ctlhttp.WithAccessToken(http.NotFoundHandler())))
 
 	cfgHandler := func(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 
-		cfg := map[string]string{
-			//"dashboardAddress": "/dashboard", // no dashboard
-			"apiAddress": "/api",
-			//"tokenRefreshAddress":  "/api/auth/refresh",
-			//"logoutAddress": "/api/auth/logout",
-			//"authPath":      "/api/auth/refresh",
+		configResponse := map[string]interface{}{
+			"apiAddress":          cfg.Controller.ApiPrefix,
+			"tokenRefreshAddress": "/api/auth/refresh",
+			"loginAddress":        authLoginAddress,
+			"serviceRestartable":  true,
+		}
+		if cfg.Controller.AuthMode != config.AuthNone {
+			configResponse["logoutAddress"] = "/api/auth/logout"
 		}
 
-		if err := json.NewEncoder(w).Encode(cfg); err != nil {
+		if err := json.NewEncoder(w).Encode(configResponse); err != nil {
 			slog.Error("Error encoding config", "err", err)
 		}
 	}
-	http.Handle("/config", http.HandlerFunc(cfgHandler))
+	http.Handle("/config", ctlhttp.NoCache(http.HandlerFunc(cfgHandler)))
 
 	addr := fmt.Sprintf("%s:%d", cfg.Controller.Hostname, cfg.Controller.Port)
 

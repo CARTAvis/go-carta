@@ -3,6 +3,10 @@ package oidc
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -16,21 +20,32 @@ import (
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth"
 )
 
-const sessionCookieName = "carta_oidc"
-
 type OIDCAuthenticator struct {
 	provider *gooidc.Provider
 	verifier *gooidc.IDTokenVerifier
 	oauth2   *oauth2.Config
 }
 
-func New(cfg config.OIDCConfig) *OIDCAuthenticator {
+func New(cfg config.OIDCConfig) (*OIDCAuthenticator, error) {
+	// Validate required configuration
+	if cfg.IssuerURL == "" {
+		return nil, fmt.Errorf("OIDC configuration error: issuer_url is required")
+	}
+	if cfg.ClientID == "" {
+		return nil, fmt.Errorf("OIDC configuration error: client_id is required")
+	}
+	if cfg.ClientSecret == "" {
+		return nil, fmt.Errorf("OIDC configuration error: client_secret is required")
+	}
+	if cfg.RedirectURL == "" {
+		return nil, fmt.Errorf("OIDC configuration error: redirect_url is required")
+	}
+
 	ctx := context.Background()
 
 	provider, err := gooidc.NewProvider(ctx, cfg.IssuerURL)
 	if err != nil {
-		slog.Error("OIDC: failed to create provider", "issuerURL", cfg.IssuerURL, "error", err)
-		panic(err)
+		return nil, fmt.Errorf("OIDC configuration error: failed to create provider for issuer %s: %w", cfg.IssuerURL, err)
 	}
 
 	oidcCfg := &gooidc.Config{
@@ -55,17 +70,18 @@ func New(cfg config.OIDCConfig) *OIDCAuthenticator {
 		provider: provider,
 		verifier: verifier,
 		oauth2:   oauth2cfg,
-	}
+	}, nil
 }
 
 // AuthenticateHTTP implements auth.Authenticator.
 //
 // Behaviour for browser flows:
 //
-//  1. If path is /oidc/login or /oidc/callback → we *don't* handle here
+//  1. If path is /api/auth/oidc_login or /api/auth/oidc_callback
+//     → we *don't* handle here
 //     (those handlers are wired separately).
 //  2. Try to authenticate from the session cookie (carta_oidc).
-//  3. If no valid cookie and no Bearer token → redirect to /oidc/login.
+//  3. If no valid cookie and no Bearer token → redirect to /api/auth/oidc_login.
 //
 // Behaviour for API clients:
 //
@@ -73,44 +89,134 @@ func New(cfg config.OIDCConfig) *OIDCAuthenticator {
 //  2. If valid → return user; if invalid → 401 via caller.
 func (o *OIDCAuthenticator) AuthenticateHTTP(w http.ResponseWriter, r *http.Request) (*auth.User, error) {
 	// Allow the OIDC endpoints themselves to run without auth.
-	if r.URL.Path == "/oidc/login" || r.URL.Path == "/oidc/callback" {
+	if r.URL.Path == "/api/auth/oidc_login" || r.URL.Path == "/api/auth/oidc_callback" {
 		return nil, fmt.Errorf("oidc endpoint passthrough")
 	}
 
-	ctx := r.Context()
-
-	// 1. Try session cookie first (browser flow)
-	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
-		if user, err := o.verifySessionCookie(ctx, c.Value); err == nil {
-			return user, nil
-		} else {
-			slog.Debug("OIDC: invalid session cookie", "error", err)
-		}
-	}
-
-	// 2. Try Bearer token (API clients)
+	// Try Bearer token (API clients and browser with JWT)
 	authHeader := r.Header.Get("Authorization")
 	if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
 		raw := strings.TrimSpace(authHeader[len("bearer "):])
-		if user, err := o.verifyRawToken(ctx, raw); err == nil {
-			return user, nil
+		claims, err := auth.VerifyToken(raw)
+		if err != nil || claims.Type != auth.TokenTypeAccess {
+			slog.Debug("OIDC: invalid access token", "error", err)
 		} else {
-			slog.Debug("OIDC: bearer token verification failed", "error", err)
+			user := &auth.User{
+				Username: claims.Username,
+				Source:   auth.SourceOIDC,
+				Claims:   map[string]any{},
+			}
+			return user, nil
 		}
 	}
 
 	// 3. No session → redirect browser to login
-	http.Redirect(w, r, "/oidc/login", http.StatusFound)
+	http.Redirect(w, r, "/api/auth/oidc_login", http.StatusFound)
 	return nil, fmt.Errorf("no OIDC session")
+}
+
+func generateRandomURLSafeString(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func codeChallengeS256(verifier string) string {
+	hash := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(hash[:])
+}
+
+func setPKCECookies(w http.ResponseWriter, state, verifier, redirectParams string) {
+	expires := time.Now().Add(5 * time.Minute)
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oidc_state",
+		Value:    state,
+		Path:     "/api/auth",
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  expires,
+	})
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oidc_code_verifier",
+		Value:    verifier,
+		Path:     "/api/auth",
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  expires,
+	})
+
+	if redirectParams != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "oidc_redirect_params",
+			Value:    base64.RawURLEncoding.EncodeToString([]byte(redirectParams)),
+			Path:     "/api/auth",
+			HttpOnly: true,
+			Secure:   false,
+			SameSite: http.SameSiteLaxMode,
+			Expires:  expires,
+		})
+	}
+}
+
+func clearPKCECookies(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oidc_state",
+		Value:    "",
+		Path:     "/api/auth",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oidc_code_verifier",
+		Value:    "",
+		Path:     "/api/auth",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oidc_redirect_params",
+		Value:    "",
+		Path:     "/api/auth",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 // LoginHandler redirects the user to Keycloak's authorization endpoint.
 func (o *OIDCAuthenticator) LoginHandler(w http.ResponseWriter, r *http.Request) {
-	// You can generate and store a proper state value; for now use a fixed one
-	// or something simple. In production, use a random per-session value.
-	state := "carta-state"
+	state, err := generateRandomURLSafeString(32)
+	if err != nil {
+		slog.Error("OIDC: failed to generate state", "error", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
 
-	url := o.oauth2.AuthCodeURL(state, oauth2.AccessTypeOffline)
+	verifier, err := generateRandomURLSafeString(64)
+	if err != nil {
+		slog.Error("OIDC: failed to generate PKCE verifier", "error", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	challenge := codeChallengeS256(verifier)
+	setPKCECookies(w, state, verifier, r.URL.Query().Get("redirectParams"))
+
+	url := o.oauth2.AuthCodeURL(state, oauth2.AccessTypeOffline,
+		oauth2.SetAuthURLParam("code_challenge", challenge),
+		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
+	)
 	http.Redirect(w, r, url, http.StatusFound)
 }
 
@@ -132,9 +238,35 @@ func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// TODO: validate 'state' if you generate a random one in LoginHandler
+	state := r.URL.Query().Get("state")
+	stateCookie, err := r.Cookie("oidc_state")
+	if err != nil || state == "" || subtle.ConstantTimeCompare([]byte(state), []byte(stateCookie.Value)) != 1 {
+		slog.Error("OIDC: invalid state", "error", err)
+		http.Error(w, "Invalid state", http.StatusBadRequest)
+		return
+	}
 
-	oauth2Token, err := o.oauth2.Exchange(ctx, code)
+	verifierCookie, err := r.Cookie("oidc_code_verifier")
+	if err != nil || verifierCookie.Value == "" {
+		slog.Error("OIDC: missing PKCE code verifier", "error", err)
+		http.Error(w, "Missing PKCE code verifier", http.StatusBadRequest)
+		return
+	}
+
+	redirectURL := "/"
+	redirectParamsCookie, rpErr := r.Cookie("oidc_redirect_params")
+	if rpErr == nil && redirectParamsCookie.Value != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(redirectParamsCookie.Value)
+		if err != nil {
+			slog.Warn("OIDC: failed to decode redirect params cookie", "error", err)
+		} else if len(decoded) > 0 {
+			redirectURL = "/?" + string(decoded)
+		}
+	}
+
+	clearPKCECookies(w)
+
+	oauth2Token, err := o.oauth2.Exchange(ctx, code, oauth2.SetAuthURLParam("code_verifier", verifierCookie.Value))
 	if err != nil {
 		slog.Error("OIDC: code exchange failed", "error", err)
 		http.Error(w, "Code exchange failed", http.StatusUnauthorized)
@@ -156,28 +288,42 @@ func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Store the raw ID token in a session cookie. It's already signed by Keycloak;
-	// we will re-verify it on each request via verifySessionCookie.
-	expiry := time.Now().Add(8 * time.Hour)
+	// Set refresh token cookie for unified JWT auth
+	if err := auth.SetRefreshTokenCookie(w, user.Username, auth.SourceOIDC); err != nil {
+		slog.Error("OIDC: failed to set refresh token cookie", "error", err)
+		http.Error(w, "Session error", http.StatusInternalServerError)
+		return
+	}
 
+	logoutEndpoint, err := o.EndSessionEndpoint(ctx)
+	if err != nil {
+		slog.Error("OIDC: failed to discover end_session_endpoint", "error", err)
+		http.Error(w, "OIDC endpoint error", http.StatusInternalServerError)
+		return
+	}
+
+	// Store raw ID token and logout endpoint cookies for logout flow.
+	// Restrict both cookies to /api/auth/logout path for security.
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
+		Name:     "oidc_id_token",
 		Value:    rawIDToken,
-		Path:     "/",
+		Path:     "/api/auth/logout",
 		HttpOnly: true,
-		Secure:   false, // set true if you serve over HTTPS
+		Secure:   false,
 		SameSite: http.SameSiteLaxMode,
-		Expires:  expiry,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oidc_logout_endpoint",
+		Value:    logoutEndpoint,
+		Path:     "/api/auth/logout",
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
 	})
 
 	slog.Info("OIDC: login successful", "username", user.Username)
 
-	http.Redirect(w, r, "/", http.StatusFound)
-}
-
-// verifySessionCookie takes the cookie value (raw ID token) and verifies it.
-func (o *OIDCAuthenticator) verifySessionCookie(ctx context.Context, rawIDToken string) (*auth.User, error) {
-	return o.verifyRawToken(ctx, rawIDToken)
+	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 
 // verifyRawToken verifies an ID token string and builds an auth.User from it.
@@ -222,4 +368,20 @@ func (o *OIDCAuthenticator) verifyRawToken(ctx context.Context, raw string) (*au
 	}
 
 	return user, nil
+}
+
+// GetLogoutURL constructs the OIDC provider's logout endpoint URL from well-known config.
+// It retrieves the end_session_endpoint from the provider's discovery metadata.
+func (o *OIDCAuthenticator) EndSessionEndpoint(ctx context.Context) (string, error) {
+	var discovery struct {
+		EndSessionEndpoint string `json:"end_session_endpoint"`
+	}
+
+	if err := o.provider.Claims(&discovery); err != nil {
+		return "", fmt.Errorf("failed to retrieve end_session_endpoint from provider metadata: %w", err)
+	}
+	if discovery.EndSessionEndpoint == "" {
+		return "", fmt.Errorf("end_session_endpoint not found in provider's well-known configuration")
+	}
+	return discovery.EndSessionEndpoint, nil
 }

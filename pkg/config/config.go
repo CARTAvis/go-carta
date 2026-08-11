@@ -22,10 +22,11 @@ const (
 )
 
 type OIDCConfig struct {
-	IssuerURL     string   `mapstrucutre:"issuer_url"`
-	ClientID      string   `mapstrucutre:"client_id"`
+	IssuerURL     string   `mapstructure:"issuer_url"`
+	ClientID      string   `mapstructure:"client_id"`
 	ClientSecret  string   `mapstructure:"client_secret"`
 	RedirectURL   string   `mapstructure:"redirect_url"`
+	AppURL        string   `mapstructure:"app_url"`
 	AllowedAud    []string `mapstructure:"allowed_aud"`
 	AllowedGroups []string `mapstructure:"allowed_groups"`
 }
@@ -34,15 +35,33 @@ type PAMConfig struct {
 	ServiceName string `mapstructure:"service_name"` // e.g. "login" or "carta"
 }
 
+type TokenConfig struct {
+	PrivateKeyLocation string `mapstructure:"private_key_location"`
+	PublicKeyLocation  string `mapstructure:"public_key_location"`
+	Issuer             string `mapstructure:"issuer"`
+	AccessTokenAge     string `mapstructure:"access_token_age"`
+	RefreshTokenAge    string `mapstructure:"refresh_token_age"`
+}
+
+type LoginPageConfig struct {
+	Title       string `mapstructure:"title"`
+	WelcomeText string `mapstructure:"welcome_text"`
+	SiteBanner  string `mapstructure:"site_banner"`
+	SupportText string `mapstructure:"support_text"`
+}
+
 type ControllerConfig struct {
-	OIDC               OIDCConfig `mapstructure:"oidc"`
-	PAM                PAMConfig  `mapstructure:"pam"`
-	Port               int        `mapstructure:"port"`
-	Hostname           string     `mapstructure:"hostname"`
-	FrontendDir        string     `mapstructure:"frontend_dir"`
-	SpawnerAddress     string     `mapstructure:"spawner_address"`
-	AuthMode           AuthMode   `mapstructure:"auth_mode"`
-	DBConnectionString string     `mapstructure:"db_conn_string"`
+	OIDC               OIDCConfig      `mapstructure:"oidc"`
+	PAM                PAMConfig       `mapstructure:"pam"`
+	TokenConfig        TokenConfig     `mapstructure:"token_config"`
+	LoginPage          LoginPageConfig `mapstructure:"login_page"`
+	Port               int             `mapstructure:"port"`
+	Hostname           string          `mapstructure:"hostname"`
+	FrontendDir        string          `mapstructure:"frontend_dir"`
+	SpawnerAddress     string          `mapstructure:"spawner_address"`
+	AuthMode           AuthMode        `mapstructure:"auth_mode"`
+	DBConnectionString string          `mapstructure:"db_conn_string"`
+	ApiPrefix          string          `mapstructure:"api_prefix"`
 }
 
 type SpawnerConfig struct {
@@ -76,7 +95,21 @@ func setControllerDefaults(v *viper.Viper) {
 	v.SetDefault("controller.oidc.client_id", "")
 	v.SetDefault("controller.oidc.client_secret", "")
 	v.SetDefault("controller.oidc.redirect_url", "")
+	v.SetDefault("controller.oidc.app_url", "")
 	v.SetDefault("controller.db_conn_string", "")
+	v.SetDefault("controller.api_prefix", "/api")
+
+	v.SetDefault("controller.login_page.title", "CARTA")
+	v.SetDefault("controller.login_page.welcome_text", "Welcome to the CARTA server.")
+	v.SetDefault("controller.login_page.site_banner", "")
+	v.SetDefault("controller.login_page.support_text", "")
+
+	v.SetDefault("controller.token_config.private_key_location", "/etc/carta/carta_private.pem")
+	v.SetDefault("controller.token_config.public_key_location", "/etc/carta/carta_public.pem")
+	v.SetDefault("controller.token_config.issuer", "carta-ctl")
+	v.SetDefault("controller.token_config.access_token_age", "10m")
+	v.SetDefault("controller.token_config.refresh_token_age", "24h")
+
 }
 
 func setSpawnerDefaults(v *viper.Viper) {
