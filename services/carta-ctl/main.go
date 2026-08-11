@@ -140,7 +140,7 @@ func main() {
 	authLoginAddress := "/login"
 
 	if cfg.Controller.DBConnectionString != "" {
-		slog.Debug("Database connection string provided", "db_conn_string", cfg.Controller.DBConnectionString)
+		slog.Debug("Database connection string provided")
 		db := database.DbConfig{
 			ConnString: cfg.Controller.DBConnectionString,
 		}
