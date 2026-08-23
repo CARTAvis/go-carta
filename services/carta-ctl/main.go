@@ -16,6 +16,7 @@ import (
 	ctlhttp "github.com/CARTAvis/go-carta/services/carta-ctl/internal/http"
 
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth"
+	authapikey "github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth/apikey"
 	authoidc "github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth/oidc"
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth/pamwrap"
 
@@ -200,6 +201,9 @@ func main() {
 	http.Handle("/api/auth/refresh", ctlhttp.NoCache(http.HandlerFunc(ctlhttp.RefreshHandler)))
 	// Logout endpoint clears the refresh cookie and redirects to login.
 	http.Handle("/api/auth/logout", ctlhttp.NoCache(ctlhttp.LogoutHandler(cfg)))
+	if cfg.Controller.AuthMode != config.AuthNone {
+		http.Handle("/api/auth/apikey_manage", ctlhttp.NoCache(authapikey.NewManageHandler()))
+	}
 
 	// Require access tokens on all other /api/ requests.
 	http.Handle("/api/", ctlhttp.NoCache(ctlhttp.WithAccessToken(http.NotFoundHandler())))
@@ -213,7 +217,8 @@ func main() {
 			"apiAddress":          cfg.Controller.ApiPrefix,
 			"tokenRefreshAddress": "/api/auth/refresh",
 			"loginAddress":        authLoginAddress,
-			"serviceRestartable":  true,
+			"serviceRestartable":  false,
+			"apiKeySupport":       cfg.Controller.AuthMode != config.AuthNone, // API key support requires authentication to manage keys
 		}
 		if cfg.Controller.AuthMode != config.AuthNone {
 			configResponse["logoutAddress"] = "/api/auth/logout"
