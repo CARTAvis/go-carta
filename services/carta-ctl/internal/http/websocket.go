@@ -18,7 +18,7 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-func NewWebSocketHandler(runtimeSpawnerAddress string, authEnabled bool) http.HandlerFunc {
+func NewWebSocketHandler(runtimeSpawnerAddress string, authEnabled bool, multiBackend bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("Handling WebSocket connection", "remoteAddr", r.RemoteAddr)
 
@@ -44,7 +44,7 @@ func NewWebSocketHandler(runtimeSpawnerAddress string, authEnabled bool) http.Ha
 		}
 		defer helpers.CloseOrLog(c)
 
-		s := session.NewSession(c, runtimeSpawnerAddress, user)
+		s := session.NewSession(c, runtimeSpawnerAddress, user, multiBackend)
 		slog.Info("Created new session", "user", user)
 
 		// Send messages back to client through websocket

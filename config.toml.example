@@ -43,6 +43,11 @@ spawner_address = "http://localhost:8080"
 # - If the controller is accessed at, e.g., http://mydomain.tld/carta/ this should then be set to "/carta/api"
 api_prefix = "/api"
 
+# Serve each open file from its own backend process instead of one backend per
+# session. Experimental; requires a frontend that understands single-tenant
+# backends. Default: false.
+multi_backend = false
+
 # ----------------------------------------------------------------------------
 # Login Page Configuration
 # ----------------------------------------------------------------------------
