@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/protobuf/proto"
@@ -42,6 +43,9 @@ type Session struct {
 	// registerViewer is the client's registration, replayed to each per-file
 	// backend so they see the same session id and client feature flags.
 	registerViewer *cartaDefinitions.RegisterViewer
+
+	// derivedFileIds numbers the images backends open on their own.
+	derivedFileIds atomic.Int32
 
 	// multiBackend serves each open file from its own backend process.
 	multiBackend bool
@@ -86,6 +90,11 @@ func (s *Session) lookupHandler(eventType cartaDefinitions.EventType) (messageHa
 		return handler, ok
 	}
 	return nil, false
+}
+
+// nextDerivedFileId allocates an id for an image a backend opened on its own.
+func (s *Session) nextDerivedFileId() int32 {
+	return derivedFileIdBase + s.derivedFileIds.Add(1)
 }
 
 // closed reports whether the session has ended.

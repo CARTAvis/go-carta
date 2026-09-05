@@ -3,6 +3,8 @@ package session
 import (
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/CARTAvis/go-carta/pkg/cartaDefinitions"
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/cartaHelpers"
 )
@@ -17,75 +19,154 @@ func momentResponse(t *testing.T, requestId uint32, acks ...*cartaDefinitions.Op
 	return framed
 }
 
-func TestDerivedFileIds_OnlySuccessfulAcks(t *testing.T) {
-	raw := momentResponse(t, 1,
-		&cartaDefinitions.OpenFileAck{Success: true, FileId: 1},
-		&cartaDefinitions.OpenFileAck{Success: false, FileId: 2},
-		&cartaDefinitions.OpenFileAck{Success: true, FileId: 3},
-	)
-	ids := derivedFileIds(cartaDefinitions.EventType_MOMENT_RESPONSE, raw[8:])
-	if len(ids) != 2 || ids[0] != 1 || ids[1] != 3 {
-		t.Fatalf("unexpected ids %v", ids)
+// clientFrame reads one frame from the client queue and decodes its payload.
+func clientFrame(t *testing.T, s *Session, msg proto.Message) cartaHelpers.MessagePrefix {
+	t.Helper()
+	out := <-s.clientSendChan
+	prefix, err := cartaHelpers.DecodeMessagePrefix(out.data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
 	}
-
-	pv := marshal(t, &cartaDefinitions.PvResponse{Success: true, OpenFileAck: &cartaDefinitions.OpenFileAck{Success: true, FileId: 7}})
-	if ids := derivedFileIds(cartaDefinitions.EventType_PV_RESPONSE, pv); len(ids) != 1 || ids[0] != 7 {
-		t.Fatalf("unexpected pv ids %v", ids)
+	if err := proto.Unmarshal(out.data[8:], msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if ids := derivedFileIds(cartaDefinitions.EventType_PV_RESPONSE, marshal(t, &cartaDefinitions.PvResponse{Success: true})); len(ids) != 0 {
-		t.Fatalf("a preview response opens no file, got %v", ids)
-	}
+	return prefix
 }
 
-func TestHandleMessage_RoutesDerivedImagesToTheirBackend(t *testing.T) {
+func TestAdoptDerivedFiles_RenumbersTheImagesAndRoutesThem(t *testing.T) {
 	s := newSessionWithFiles(0)
 	w0, _ := s.getFileWorker(0)
 
-	w0.handleMessage(momentResponse(t, 1, &cartaDefinitions.OpenFileAck{Success: true, FileId: 1}))
+	// The backend numbers its moment map 1, which the client already uses.
+	w0.handleMessage(momentResponse(t, 4,
+		&cartaDefinitions.OpenFileAck{Success: true, FileId: 1, FileInfo: &cartaDefinitions.FileInfo{Name: "moment"}},
+		&cartaDefinitions.OpenFileAck{Success: false, FileId: 2},
+	))
 
-	if out := <-s.clientSendChan; len(out.data) == 0 {
-		t.Fatal("response should still be forwarded to the client")
+	var response cartaDefinitions.MomentResponse
+	clientFrame(t, s, &response)
+	if len(response.OpenFileAcks) != 2 {
+		t.Fatalf("expected both acks forwarded, got %d", len(response.OpenFileAcks))
 	}
-	if w, ok := s.getFileWorker(1); !ok || w != w0 {
-		t.Fatal("derived image should route to the backend that created it")
+	fileId := response.OpenFileAcks[0].FileId
+	if fileId <= derivedFileIdBase {
+		t.Fatalf("the image should have been renumbered, got %d", fileId)
+	}
+	if response.OpenFileAcks[0].FileInfo.GetName() != "moment" {
+		t.Fatal("the rest of the response should survive renumbering")
+	}
+	if response.OpenFileAcks[1].FileId != 2 {
+		t.Fatal("an image the backend failed to open should not be renumbered")
+	}
+	if w, ok := s.getFileWorker(fileId); !ok || w != w0 {
+		t.Fatal("the image should route to the backend that opened it")
+	}
+	if backendFileId, ok := w0.backendFileId(fileId); !ok || backendFileId != 1 {
+		t.Fatalf("expected a translation back to 1, got %d ok=%v", backendFileId, ok)
+	}
+}
+
+func TestDerivedFile_MessagesAreTranslatedBothWays(t *testing.T) {
+	s := newSessionWithFiles(0)
+	w0, _ := s.getFileWorker(0)
+	const fileId, backendFileId = derivedFileIdBase + 1, 1
+	s.addFileAlias(fileId, w0)
+	w0.mapDerivedFile(fileId, backendFileId)
+
+	// The client asks about the image by the id it was given.
+	raw := marshal(t, &cartaDefinitions.SetImageChannels{FileId: fileId, Channel: 7})
+	if err := s.handleProxiedMessage(cartaDefinitions.EventType_SET_IMAGE_CHANNELS, 3, raw); err != nil {
+		t.Fatalf("handleProxiedMessage: %v", err)
+	}
+	out := <-w0.sendChan
+	var request cartaDefinitions.SetImageChannels
+	if err := proto.Unmarshal(out.data[8:], &request); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if request.FileId != backendFileId || request.Channel != 7 {
+		t.Fatalf("the backend should be asked about its own id, got %+v", &request)
+	}
+
+	// The backend answers with its own id, which the client never saw.
+	tile, err := cartaHelpers.PrepareMessagePayload(&cartaDefinitions.RasterTileData{FileId: backendFileId, Channel: 7},
+		cartaDefinitions.EventType_RASTER_TILE_DATA, 0)
+	if err != nil {
+		t.Fatalf("frame: %v", err)
+	}
+	w0.handleMessage(tile)
+
+	var data cartaDefinitions.RasterTileData
+	clientFrame(t, s, &data)
+	if data.FileId != fileId || data.Channel != 7 {
+		t.Fatalf("the client should see the id it was given, got %+v", &data)
+	}
+}
+
+func TestDerivedFile_UntranslatedMessagesAreLeftAlone(t *testing.T) {
+	s := newSessionWithFiles(0)
+	w0, _ := s.getFileWorker(0)
+
+	raw := marshal(t, &cartaDefinitions.SetImageChannels{FileId: 0, Channel: 2})
+	if err := s.handleProxiedMessage(cartaDefinitions.EventType_SET_IMAGE_CHANNELS, 3, raw); err != nil {
+		t.Fatalf("handleProxiedMessage: %v", err)
+	}
+
+	out := <-w0.sendChan
+	var request cartaDefinitions.SetImageChannels
+	if err := proto.Unmarshal(out.data[8:], &request); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if request.FileId != 0 || request.Channel != 2 {
+		t.Fatalf("a file the client opened itself should pass through, got %+v", &request)
 	}
 }
 
 func TestHandleCloseFile_DerivedImageIsClosedOnItsBackend(t *testing.T) {
 	s := newSessionWithFiles(0)
 	w0, _ := s.getFileWorker(0)
-	s.addFileAlias(1, w0)
+	const fileId, backendFileId = derivedFileIdBase + 1, 1
+	s.addFileAlias(fileId, w0)
+	w0.mapDerivedFile(fileId, backendFileId)
 
-	closeFile(t, s, 1)
+	closeFile(t, s, fileId)
 
-	expectWorkerEvent(t, w0, cartaDefinitions.EventType_CLOSE_FILE)
+	out := <-w0.sendChan
+	var closed cartaDefinitions.CloseFile
+	if err := proto.Unmarshal(out.data[8:], &closed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if closed.FileId != backendFileId {
+		t.Fatalf("the backend should be told its own id, got %d", closed.FileId)
+	}
 	if w0.isDone() {
-		t.Fatal("closing a derived image must not shut down the backend")
+		t.Fatal("closing an image the backend opened must not shut the backend down")
 	}
-	if _, ok := s.getFileWorker(1); ok {
-		t.Fatal("derived image should be unregistered")
+	if _, ok := s.getFileWorker(fileId); ok {
+		t.Fatal("the image should be unregistered")
 	}
-	if _, ok := s.getFileWorker(0); !ok {
-		t.Fatal("primary file should still be open")
+	if _, ok := w0.backendFileId(fileId); ok {
+		t.Fatal("the translation should be forgotten")
 	}
 }
 
 func TestHandleCloseFile_PrimaryTakesDerivedImagesWithIt(t *testing.T) {
 	s := newSessionWithFiles(0)
 	w0, _ := s.getFileWorker(0)
-	s.addFileAlias(1, w0)
-	s.setPvPreviewFile(42, 1)
+	const fileId = derivedFileIdBase + 1
+	s.addFileAlias(fileId, w0)
+	w0.mapDerivedFile(fileId, 1)
+	s.setPvPreviewFile(42, fileId)
 
 	closeFile(t, s, 0)
 
 	if !w0.isDone() {
 		t.Fatal("backend should be shut down")
 	}
-	if _, ok := s.getFileWorker(1); ok {
-		t.Fatal("derived image should go with its backend")
+	if _, ok := s.getFileWorker(fileId); ok {
+		t.Fatal("images the backend opened should go with it")
 	}
 	if _, ok := s.pvPreviewFile(42); ok {
-		t.Fatal("preview on the derived image should be dropped")
+		t.Fatal("a preview on one of those images should be dropped")
 	}
 }
 

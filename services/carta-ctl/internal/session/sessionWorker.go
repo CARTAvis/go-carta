@@ -35,6 +35,12 @@ type SessionWorker struct {
 	done         chan struct{}
 	shutdownOnce sync.Once
 
+	// derivedMu guards the translation between the ids the client uses for
+	// images this backend opened on its own and the ids the backend gave them.
+	derivedMu       sync.Mutex
+	derivedToBacked map[int32]int32
+	derivedToClient map[int32]int32
+
 	// pending maps controller-originated request ids to their waiting channel.
 	reqMu      sync.Mutex
 	pending    map[uint32]chan WorkerMessage
@@ -160,6 +166,47 @@ func releaseBackend(name, workerId, spawnerAddress string) {
 	slog.Info("Shut down backend", "workerName", name, "workerId", workerId)
 }
 
+// mapDerivedFile records that fileId, as the client knows it, is backendFileId
+// to this backend.
+func (sw *SessionWorker) mapDerivedFile(fileId, backendFileId int32) {
+	sw.derivedMu.Lock()
+	defer sw.derivedMu.Unlock()
+	if sw.derivedToBacked == nil {
+		sw.derivedToBacked = make(map[int32]int32)
+		sw.derivedToClient = make(map[int32]int32)
+	}
+	sw.derivedToBacked[fileId] = backendFileId
+	sw.derivedToClient[backendFileId] = fileId
+}
+
+// backendFileId translates an id the client used into the id this backend
+// knows the image by.
+func (sw *SessionWorker) backendFileId(fileId int32) (int32, bool) {
+	sw.derivedMu.Lock()
+	defer sw.derivedMu.Unlock()
+	backendFileId, ok := sw.derivedToBacked[fileId]
+	return backendFileId, ok
+}
+
+// clientFileId translates an id this backend used into the id the client
+// knows the image by.
+func (sw *SessionWorker) clientFileId(backendFileId int32) (int32, bool) {
+	sw.derivedMu.Lock()
+	defer sw.derivedMu.Unlock()
+	fileId, ok := sw.derivedToClient[backendFileId]
+	return fileId, ok
+}
+
+// forgetDerivedFile drops the translation for an image the client has closed.
+func (sw *SessionWorker) forgetDerivedFile(fileId int32) {
+	sw.derivedMu.Lock()
+	defer sw.derivedMu.Unlock()
+	if backendFileId, ok := sw.derivedToBacked[fileId]; ok {
+		delete(sw.derivedToBacked, fileId)
+		delete(sw.derivedToClient, backendFileId)
+	}
+}
+
 func (sw *SessionWorker) isDone() bool {
 	select {
 	case <-sw.done:
@@ -249,7 +296,11 @@ func (sw *SessionWorker) handleMessage(message []byte) {
 		return
 	}
 
-	sw.registerDerivedFiles(prefix.EventType, message[8:])
+	if rewritten := sw.adoptDerivedFiles(prefix.EventType, message[8:], prefix.RequestId); rewritten != nil {
+		sw.owner.sendToClient(rewritten)
+		return
+	}
+	message = sw.relabelForClient(prefix, message)
 
 	// Send the open file request once the backend has registered the viewer
 	if sw.fileRequest != nil && prefix.EventType == cartaDefinitions.EventType_REGISTER_VIEWER_ACK {
@@ -263,6 +314,25 @@ func (sw *SessionWorker) handleMessage(message []byte) {
 	}
 
 	sw.owner.sendToClient(message)
+}
+
+// relabelForClient rewrites a backend message about an image the backend
+// opened on its own so it names the id the client knows.
+func (sw *SessionWorker) relabelForClient(prefix cartaHelpers.MessagePrefix, message []byte) []byte {
+	backendFileId, ok := cartaHelpers.FileIdFromBytes(prefix.EventType, message[8:])
+	if !ok {
+		return message
+	}
+	fileId, ok := sw.clientFileId(backendFileId)
+	if !ok {
+		return message
+	}
+	payload, err := cartaHelpers.RewriteFileId(prefix.EventType, message[8:], fileId)
+	if err != nil {
+		slog.Error("Failed to relabel a backend message", "eventType", prefix.EventType, "workerName", sw.name, "error", err)
+		return message
+	}
+	return cartaHelpers.PrepareBinaryMessage(payload, prefix.EventType, prefix.RequestId)
 }
 
 // openFileAfterRegistration forwards the open request once the backend has
