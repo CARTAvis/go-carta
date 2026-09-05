@@ -29,7 +29,9 @@ type Session struct {
 	clientSendChan chan outbound
 
 	// mu guards sharedWorker and fileMap, which are written by registration
-	// and teardown while routing reads them from other goroutines.
+	// and teardown while routing reads them from other goroutines. fileMap
+	// also holds images a backend derived from its own file, pointing at that
+	// backend's worker.
 	mu           sync.Mutex
 	sharedWorker *SessionWorker
 	fileMap      map[int32]*SessionWorker
@@ -196,16 +198,42 @@ func (s *Session) removeWorker(w *SessionWorker) (fileIds []int32, wasShared boo
 	return fileIds, wasShared
 }
 
-// takeFileWorkers unregisters and returns every file worker.
-func (s *Session) takeFileWorkers() []*SessionWorker {
+// addFileAlias routes fileId, an image w's backend opened on its own, to w. It
+// returns false if the id could not be taken, either because another backend
+// already serves it or because the session has ended.
+func (s *Session) addFileAlias(fileId int32, w *SessionWorker) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed() {
+		return false
+	}
+	if existing, ok := s.fileMap[fileId]; ok && existing != w {
+		return false
+	}
+	if s.fileMap == nil {
+		s.fileMap = make(map[int32]*SessionWorker)
+	}
+	s.fileMap[fileId] = w
+	return true
+}
+
+// takeFileWorkers unregisters every file id and returns the ids and the
+// distinct workers that served them.
+func (s *Session) takeFileWorkers() ([]int32, []*SessionWorker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fileIds := make([]int32, 0, len(s.fileMap))
 	workers := make([]*SessionWorker, 0, len(s.fileMap))
-	for _, w := range s.fileMap {
-		workers = append(workers, w)
+	seen := make(map[*SessionWorker]bool, len(s.fileMap))
+	for fileId, w := range s.fileMap {
+		fileIds = append(fileIds, fileId)
+		if !seen[w] {
+			seen[w] = true
+			workers = append(workers, w)
+		}
 	}
 	s.fileMap = nil
-	return workers
+	return fileIds, workers
 }
 
 // parse decodes a client message. Only a register-viewer message is accepted
@@ -314,7 +342,8 @@ func (s *Session) endSession() {
 // try to register and shut themselves down.
 func (s *Session) HandleDisconnect() {
 	s.Cancel()
-	for _, w := range s.takeFileWorkers() {
+	_, workers := s.takeFileWorkers()
+	for _, w := range workers {
 		w.shutdown()
 	}
 	if w := s.takeSharedWorker(); w != nil {

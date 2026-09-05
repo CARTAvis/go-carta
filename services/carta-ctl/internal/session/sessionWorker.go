@@ -249,6 +249,8 @@ func (sw *SessionWorker) handleMessage(message []byte) {
 		return
 	}
 
+	sw.registerDerivedFiles(prefix.EventType, message[8:])
+
 	// Send the open file request once the backend has registered the viewer
 	if sw.fileRequest != nil && prefix.EventType == cartaDefinitions.EventType_REGISTER_VIEWER_ACK {
 		sw.openFileAfterRegistration(message[8:])

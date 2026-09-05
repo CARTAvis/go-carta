@@ -127,7 +127,7 @@ func TestHandleCloseFile_CloseAllAlsoReachesSharedBackend(t *testing.T) {
 
 	closeFile(t, s, -1)
 
-	if workers := s.takeFileWorkers(); len(workers) != 0 {
+	if _, workers := s.takeFileWorkers(); len(workers) != 0 {
 		t.Fatalf("expected all file workers reaped, %d remain", len(workers))
 	}
 	expectWorkerEvent(t, s.sharedWorker, cartaDefinitions.EventType_CLOSE_FILE)
