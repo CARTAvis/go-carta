@@ -33,6 +33,10 @@ type Session struct {
 	mu           sync.Mutex
 	sharedWorker *SessionWorker
 	fileMap      map[int32]*SessionWorker
+	// pvPreviewToFile maps a PV preview id to the file whose backend serves it.
+	pvPreviewMu     sync.Mutex
+	pvPreviewToFile map[int32]int32
+
 	// registerViewer is the client's registration, replayed to each per-file
 	// backend so they see the same session id and client feature flags.
 	registerViewer *cartaDefinitions.RegisterViewer
@@ -52,8 +56,11 @@ var handlerMap = map[cartaDefinitions.EventType]messageHandler{
 
 // multiBackendHandlerMap holds handlers that only apply when each file has its own backend.
 var multiBackendHandlerMap = map[cartaDefinitions.EventType]messageHandler{
-	cartaDefinitions.EventType_OPEN_FILE:  (*Session).handleOpenFile,
-	cartaDefinitions.EventType_CLOSE_FILE: (*Session).handleCloseFile,
+	cartaDefinitions.EventType_OPEN_FILE:        (*Session).handleOpenFile,
+	cartaDefinitions.EventType_CLOSE_FILE:       (*Session).handleCloseFile,
+	cartaDefinitions.EventType_PV_REQUEST:       (*Session).handlePvRequest,
+	cartaDefinitions.EventType_STOP_PV_PREVIEW:  (*Session).handleStopPvPreview,
+	cartaDefinitions.EventType_CLOSE_PV_PREVIEW: (*Session).handleClosePvPreview,
 }
 
 func NewSession(conn *websocket.Conn, workerAddr string, user *auth.User, multiBackend bool) *Session {
