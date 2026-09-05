@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -34,6 +35,11 @@ type SessionWorker struct {
 	done         chan struct{}
 	shutdownOnce sync.Once
 
+	// pending maps controller-originated request ids to their waiting channel.
+	reqMu      sync.Mutex
+	pending    map[uint32]chan WorkerMessage
+	reqCounter atomic.Uint32
+
 	// mu guards workerId and conn, which start is still filling in when a
 	// concurrent shutdown may read them.
 	mu       sync.Mutex
@@ -49,6 +55,7 @@ func newSessionWorker(owner *Session, fileRequest *cartaDefinitions.OpenFile, re
 		name:        "shared-worker",
 		sendChan:    make(chan outbound, 100),
 		done:        make(chan struct{}),
+		pending:     make(map[uint32]chan WorkerMessage),
 	}
 	if fileRequest != nil {
 		sw.name = fmt.Sprintf("worker:%d", fileRequest.FileId)
@@ -223,6 +230,7 @@ func (sw *SessionWorker) readLoop(conn *websocket.Conn) {
 		sw.handleMessage(message)
 	}
 	sw.owner.workerLost(sw)
+	sw.failAllPending()
 }
 
 func (sw *SessionWorker) handleMessage(message []byte) {
@@ -232,6 +240,14 @@ func (sw *SessionWorker) handleMessage(message []byte) {
 		return
 	}
 	slog.Debug("Received message from worker", "eventType", prefix.EventType, "workerName", sw.name)
+
+	if sw.deliverToPending(prefix.RequestId, prefix.EventType, message[8:]) {
+		return
+	}
+	if prefix.RequestId&controllerRequestIDBit != 0 {
+		slog.Warn("Dropping late response to a controller request", "eventType", prefix.EventType, "requestId", prefix.RequestId, "workerName", sw.name)
+		return
+	}
 
 	// Send the open file request once the backend has registered the viewer
 	if sw.fileRequest != nil && prefix.EventType == cartaDefinitions.EventType_REGISTER_VIEWER_ACK {
