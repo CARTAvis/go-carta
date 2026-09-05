@@ -18,6 +18,7 @@ func (s *Session) handleCloseFile(eventType cartaDefinitions.EventType, requestI
 	if payload.FileId == -1 {
 		err := s.proxyToShared(eventType, requestId, msg)
 		for _, w := range s.takeFileWorkers() {
+			s.deletePvPreviewsForFile(w.fileRequest.FileId)
 			w.shutdown()
 		}
 		return err
@@ -26,13 +27,11 @@ func (s *Session) handleCloseFile(eventType cartaDefinitions.EventType, requestI
 	if w == nil {
 		return s.proxyToShared(eventType, requestId, msg)
 	}
+	s.deletePvPreviewsForFile(payload.FileId)
 	w.shutdown()
 	return nil
 }
 
-// workerLost unregisters a worker whose backend connection has dropped and
-// shuts it down. Losing the shared backend ends the session, so the client
-// reconnects rather than talking to a backend that is gone.
 // dropWorker unregisters a worker and shuts it down, without reporting it as
 // a loss. Used when the client is told what happened by other means.
 func (s *Session) dropWorker(sw *SessionWorker) {
@@ -40,8 +39,14 @@ func (s *Session) dropWorker(sw *SessionWorker) {
 	sw.shutdown()
 }
 
+// workerLost unregisters a worker whose backend connection has dropped and
+// shuts it down. Losing the shared backend ends the session, so the client
+// reconnects rather than talking to a backend that is gone.
 func (s *Session) workerLost(sw *SessionWorker) {
 	fileIds, wasShared := s.removeWorker(sw)
+	for _, fileId := range fileIds {
+		s.deletePvPreviewsForFile(fileId)
+	}
 	sw.shutdown()
 	if wasShared {
 		slog.Warn("Shared backend connection lost, ending session", "user", s.User)
