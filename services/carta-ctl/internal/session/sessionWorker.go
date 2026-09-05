@@ -239,6 +239,11 @@ func (sw *SessionWorker) handleMessage(message []byte) {
 		return
 	}
 
+	if sw.fileRequest == nil && prefix.EventType == cartaDefinitions.EventType_REGISTER_VIEWER_ACK {
+		sw.owner.forwardRegisterViewerAck(prefix.RequestId, message[8:])
+		return
+	}
+
 	sw.owner.sendToClient(message)
 }
 
