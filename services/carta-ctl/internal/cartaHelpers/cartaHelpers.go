@@ -111,6 +111,11 @@ var messageTypeMap = map[cartaDefinitions.EventType]func() proto.Message{
 	cartaDefinitions.EventType_CATALOG_FILTER_REQUEST:        func() proto.Message { return &cartaDefinitions.CatalogFilterRequest{} },
 }
 
+// PrepareMessagePayloadBytes frames an already-encoded payload.
+func PrepareMessagePayloadBytes(payload []byte, eventType cartaDefinitions.EventType, requestId uint32) ([]byte, error) {
+	return PrepareBinaryMessage(payload, eventType, requestId), nil
+}
+
 // UnmarshalMessage Un-marshals raw message bytes into the appropriate protobuf message type based on EventType
 func UnmarshalMessage(eventType cartaDefinitions.EventType, rawMsg []byte) (proto.Message, error) {
 	// Look up the message constructor in the map

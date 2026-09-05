@@ -34,7 +34,9 @@ func (s *Session) handleCloseFile(eventType cartaDefinitions.EventType, requestI
 	}
 	s.deletePvPreviewsForFile(payload.FileId)
 	if w.fileRequest.FileId != payload.FileId {
-		return s.sendToWorker(w, eventType, requestId, msg)
+		err := s.sendToWorker(w, eventType, requestId, msg)
+		w.forgetDerivedFile(payload.FileId)
+		return err
 	}
 	fileIds, _ := s.removeWorker(w)
 	for _, fileId := range fileIds {

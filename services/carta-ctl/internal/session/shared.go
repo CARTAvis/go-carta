@@ -54,8 +54,28 @@ func (s *Session) sendToWorker(worker *SessionWorker, eventType cartaDefinitions
 	if worker == nil {
 		return fmt.Errorf("no worker available to handle %v", eventType)
 	}
+	bytes = relabelForBackend(worker, eventType, bytes)
 	slog.Debug("Proxying message from client to worker", "eventType", eventType, "workerName", worker.name)
 	return worker.enqueue(cartaHelpers.PrepareBinaryMessage(bytes, eventType, requestId))
+}
+
+// relabelForBackend rewrites a client message about an image the backend
+// opened on its own so it names the id that backend knows.
+func relabelForBackend(worker *SessionWorker, eventType cartaDefinitions.EventType, bytes []byte) []byte {
+	fileId, ok := cartaHelpers.FileIdFromBytes(eventType, bytes)
+	if !ok {
+		return bytes
+	}
+	backendFileId, ok := worker.backendFileId(fileId)
+	if !ok {
+		return bytes
+	}
+	payload, err := cartaHelpers.RewriteFileId(eventType, bytes, backendFileId)
+	if err != nil {
+		slog.Error("Failed to relabel a client message", "eventType", eventType, "workerName", worker.name, "error", err)
+		return bytes
+	}
+	return payload
 }
 
 func (s *Session) handleStatusMessage(_ cartaDefinitions.EventType, _ uint32, _ []byte) error {

@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/CARTAvis/go-carta/pkg/cartaDefinitions"
+	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/cartaHelpers"
 )
 
 // bulkAckTimeout bounds how long a BULK_SET_REGION waits for its backends.
@@ -19,6 +20,23 @@ const bulkAckTimeout = 10 * time.Second
 type pendingSetRegion struct {
 	index int
 	req   *pendingRequest
+}
+
+// relabelRegionForBackend returns a copy of a bulk entry naming the id its
+// backend knows the image by, or the entry unchanged when no translation
+// applies.
+func relabelRegionForBackend[T proto.Message](worker *SessionWorker, entry T) T {
+	fileId, ok := cartaHelpers.ExtractFileId(entry)
+	if !ok {
+		return entry
+	}
+	backendFileId, ok := worker.backendFileId(fileId)
+	if !ok {
+		return entry
+	}
+	relabelled, _ := proto.Clone(entry).(T)
+	cartaHelpers.SetFileId(relabelled, backendFileId)
+	return relabelled
 }
 
 func failedSetRegionAck(sr *cartaDefinitions.SetRegion, msg string) *cartaDefinitions.SetRegionAck {
@@ -43,6 +61,7 @@ func (s *Session) handleBulkSetRegion(_ cartaDefinitions.EventType, requestId ui
 			acks[i] = failedSetRegionAck(sr, fmt.Sprintf("no backend for file_id=%d", sr.GetFileId()))
 			continue
 		}
+		sr = relabelRegionForBackend(worker, sr)
 		// The backend does not acknowledge preview regions, so the entry is
 		// forwarded under a controller id, which swallows any stray reply, and
 		// reported as delivered rather than applied.
@@ -125,6 +144,7 @@ func (s *Session) handleBulkRemoveRegion(_ cartaDefinitions.EventType, requestId
 			errs = append(errs, fmt.Errorf("no backend for file_id=%d", rr.GetFileId()))
 			continue
 		}
+		rr = relabelRegionForBackend(worker, rr)
 		if err := worker.proxyMessageToWorker(rr, cartaDefinitions.EventType_REMOVE_REGION, requestId); err != nil {
 			errs = append(errs, fmt.Errorf("file_id=%d: %w", rr.GetFileId(), err))
 		}
