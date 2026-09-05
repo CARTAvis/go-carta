@@ -44,8 +44,10 @@ type Session struct {
 type messageHandler func(*Session, cartaDefinitions.EventType, uint32, []byte) error
 
 var handlerMap = map[cartaDefinitions.EventType]messageHandler{
-	cartaDefinitions.EventType_REGISTER_VIEWER: (*Session).handleRegisterViewerMessage,
-	cartaDefinitions.EventType_EMPTY_EVENT:     (*Session).handleStatusMessage,
+	cartaDefinitions.EventType_REGISTER_VIEWER:    (*Session).handleRegisterViewerMessage,
+	cartaDefinitions.EventType_EMPTY_EVENT:        (*Session).handleStatusMessage,
+	cartaDefinitions.EventType_BULK_SET_REGION:    (*Session).handleBulkSetRegion,
+	cartaDefinitions.EventType_BULK_REMOVE_REGION: (*Session).handleBulkRemoveRegion,
 }
 
 // multiBackendHandlerMap holds handlers that only apply when each file has its own backend.
@@ -271,6 +273,9 @@ func (s *Session) HandleMessage(msg []byte) error {
 	prefix, err := cartaHelpers.DecodeMessagePrefix(msg)
 	if err != nil {
 		return fmt.Errorf("failed to unmarshal message: %v", err)
+	}
+	if prefix.RequestId&controllerRequestIDBit != 0 {
+		return fmt.Errorf("request id %d is reserved for the controller", prefix.RequestId)
 	}
 
 	handler, ok := s.lookupHandler(prefix.EventType)
