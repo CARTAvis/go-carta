@@ -8,8 +8,9 @@ import (
 )
 
 // handleCloseFile shuts down the backend serving the file, or every file
-// backend when file_id is -1. Files held by the shared backend are closed by
-// forwarding the message to it.
+// backend when file_id is -1. An image a backend derived from its own file is
+// closed on that backend, which keeps running. Files held by the shared
+// backend are closed by forwarding the message to it.
 func (s *Session) handleCloseFile(eventType cartaDefinitions.EventType, requestId uint32, msg []byte) error {
 	var payload cartaDefinitions.CloseFile
 	if err := s.parse(&payload, msg); err != nil {
@@ -17,17 +18,28 @@ func (s *Session) handleCloseFile(eventType cartaDefinitions.EventType, requestI
 	}
 	if payload.FileId == -1 {
 		err := s.proxyToShared(eventType, requestId, msg)
-		for _, w := range s.takeFileWorkers() {
-			s.deletePvPreviewsForFile(w.fileRequest.FileId)
+		fileIds, workers := s.takeFileWorkers()
+		for _, fileId := range fileIds {
+			s.deletePvPreviewsForFile(fileId)
+		}
+		for _, w := range workers {
 			w.shutdown()
 		}
 		return err
 	}
+
 	w := s.takeFileWorker(payload.FileId)
 	if w == nil {
 		return s.proxyToShared(eventType, requestId, msg)
 	}
 	s.deletePvPreviewsForFile(payload.FileId)
+	if w.fileRequest.FileId != payload.FileId {
+		return s.sendToWorker(w, eventType, requestId, msg)
+	}
+	fileIds, _ := s.removeWorker(w)
+	for _, fileId := range fileIds {
+		s.deletePvPreviewsForFile(fileId)
+	}
 	w.shutdown()
 	return nil
 }
@@ -39,9 +51,10 @@ func (s *Session) dropWorker(sw *SessionWorker) {
 	sw.shutdown()
 }
 
-// workerLost unregisters a worker whose backend connection has dropped and
-// shuts it down. Losing the shared backend ends the session, so the client
-// reconnects rather than talking to a backend that is gone.
+// workerLost unregisters a worker whose backend connection has dropped, along
+// with any derived images it served, and shuts it down. Losing the shared
+// backend ends the session, so the client reconnects rather than talking to a
+// backend that is gone.
 func (s *Session) workerLost(sw *SessionWorker) {
 	fileIds, wasShared := s.removeWorker(sw)
 	for _, fileId := range fileIds {
