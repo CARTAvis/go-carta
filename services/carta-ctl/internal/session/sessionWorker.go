@@ -3,6 +3,8 @@ package session
 import (
 	"fmt"
 	"log/slog"
+	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/protobuf/proto"
@@ -10,14 +12,154 @@ import (
 	"github.com/CARTAvis/go-carta/pkg/cartaDefinitions"
 	helpers "github.com/CARTAvis/go-carta/pkg/shared"
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/cartaHelpers"
+	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/spawnerHelpers"
 )
 
+// sendTimeout bounds how long a message waits for a backend that is not
+// reading its socket, so one backend cannot stall the whole session.
+const sendTimeout = 5 * time.Second
+
+// SessionWorker proxies one backend process. fileRequest is nil for the
+// session's shared worker. A worker is registered with its session before the
+// backend is started, so a close that arrives while it is starting is honoured.
 type SessionWorker struct {
-	fileRequest    *cartaDefinitions.OpenFile
-	requestId      uint32
-	conn           *websocket.Conn
-	sendChan       chan []byte
-	clientSendChan chan []byte
+	owner       *Session
+	fileRequest *cartaDefinitions.OpenFile
+	requestId   uint32
+	name        string
+	sendChan    chan outbound
+
+	// done is closed by shutdown. sendChan is never closed, so senders select
+	// on done instead.
+	done         chan struct{}
+	shutdownOnce sync.Once
+
+	// mu guards workerId and conn, which start is still filling in when a
+	// concurrent shutdown may read them.
+	mu       sync.Mutex
+	workerId string
+	conn     *websocket.Conn
+}
+
+func newSessionWorker(owner *Session, fileRequest *cartaDefinitions.OpenFile, requestId uint32) *SessionWorker {
+	sw := &SessionWorker{
+		owner:       owner,
+		fileRequest: fileRequest,
+		requestId:   requestId,
+		name:        "shared-worker",
+		sendChan:    make(chan outbound, 100),
+		done:        make(chan struct{}),
+	}
+	if fileRequest != nil {
+		sw.name = fmt.Sprintf("worker:%d", fileRequest.FileId)
+	}
+	return sw
+}
+
+// start asks the spawner for a backend, connects to it and starts the proxy
+// goroutines. A backend obtained after the worker was shut down is released
+// again.
+func (sw *SessionWorker) start() error {
+	if sw.isDone() {
+		return fmt.Errorf("worker %s was closed before starting", sw.name)
+	}
+	info, err := spawnerHelpers.RequestWorkerStartup(sw.owner.SpawnerAddress, sw.owner.User.Username)
+	if err != nil {
+		sw.shutdown()
+		return fmt.Errorf("error starting worker: %w", err)
+	}
+	if !sw.claim(info.WorkerId) {
+		releaseBackend(sw.name, info.WorkerId, sw.owner.SpawnerAddress)
+		return fmt.Errorf("worker %s was closed while starting", sw.name)
+	}
+	slog.Info("Worker started", "workerName", sw.name, "workerId", info.WorkerId, "address", info.Address, "port", info.Port)
+
+	addr := fmt.Sprintf("ws://%s:%d", info.Address, info.Port)
+	conn, _, err := websocket.DefaultDialer.DialContext(sw.owner.Context, addr, nil)
+	if err != nil {
+		sw.shutdown()
+		return fmt.Errorf("could not connect to worker at %s: %w", addr, err)
+	}
+	if !sw.attach(conn) {
+		helpers.CloseOrLog(conn)
+		return fmt.Errorf("worker %s was closed while starting", sw.name)
+	}
+	go func() {
+		sendHandler(sw.sendChan, sw.done, conn, sw.name)
+		sw.shutdown()
+	}()
+	go sw.readLoop(conn)
+	return nil
+}
+
+func (sw *SessionWorker) claim(workerId string) bool {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	if sw.isDone() {
+		return false
+	}
+	sw.workerId = workerId
+	return true
+}
+
+func (sw *SessionWorker) attach(conn *websocket.Conn) bool {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	if sw.isDone() {
+		return false
+	}
+	sw.conn = conn
+	return true
+}
+
+// startAsync starts the backend in the background so the session keeps
+// handling client messages while the spawner works. A failure is reported to
+// the client through failure, unless the worker was closed meanwhile, in which
+// case the client already knows the file is gone.
+func (sw *SessionWorker) startAsync(failure func(error)) {
+	go func() {
+		if err := sw.start(); err != nil {
+			if fileIds, wasShared := sw.owner.removeWorker(sw); len(fileIds) == 0 && !wasShared {
+				return
+			}
+			slog.Error("Failed to start backend", "workerName", sw.name, "error", err)
+			failure(err)
+		}
+	}()
+}
+
+// shutdown stops the proxy goroutines, closes the backend connection and asks
+// the spawner to stop the backend process. Repeated calls are no-ops.
+func (sw *SessionWorker) shutdown() {
+	sw.shutdownOnce.Do(func() {
+		close(sw.done)
+		sw.mu.Lock()
+		conn, workerId := sw.conn, sw.workerId
+		sw.mu.Unlock()
+		if conn != nil {
+			helpers.CloseOrLog(conn)
+		}
+		if workerId != "" {
+			go releaseBackend(sw.name, workerId, sw.owner.SpawnerAddress)
+		}
+	})
+}
+
+func releaseBackend(name, workerId, spawnerAddress string) {
+	if err := spawnerHelpers.RequestWorkerShutdown(workerId, spawnerAddress); err != nil {
+		slog.Error("Failed to shut down backend", "workerName", name, "workerId", workerId, "error", err)
+		return
+	}
+	slog.Info("Shut down backend", "workerName", name, "workerId", workerId)
+}
+
+func (sw *SessionWorker) isDone() bool {
+	select {
+	case <-sw.done:
+		return true
+	default:
+		return false
+	}
 }
 
 func (sw *SessionWorker) proxyMessageToWorker(msg proto.Message, eventType cartaDefinitions.EventType, requestId uint32) error {
@@ -25,25 +167,46 @@ func (sw *SessionWorker) proxyMessageToWorker(msg proto.Message, eventType carta
 	if err != nil {
 		return err
 	}
-
-	slog.Debug("Proxying message from session to worker", "eventType", eventType)
-	sw.sendChan <- byteData
-	return nil
+	slog.Debug("Proxying message from session to worker", "eventType", eventType, "workerName", sw.name)
+	return sw.enqueue(byteData)
 }
 
-func (sw *SessionWorker) workerMessageHandler() {
+// enqueue hands a framed binary message to the send handler. It fails once
+// the worker is shutting down.
+func (sw *SessionWorker) enqueue(byteData []byte) error {
+	return sw.send(outbound{messageType: websocket.BinaryMessage, data: byteData})
+}
+
+func (sw *SessionWorker) send(out outbound) error {
+	if sw.isDone() {
+		return fmt.Errorf("worker %s is shutting down", sw.name)
+	}
+	select {
+	case sw.sendChan <- out:
+		return nil
+	case <-sw.done:
+		return fmt.Errorf("worker %s is shutting down", sw.name)
+	case <-time.After(sendTimeout):
+		return fmt.Errorf("worker %s is not reading its messages", sw.name)
+	}
+}
+
+func (sw *SessionWorker) readLoop(conn *websocket.Conn) {
 	for {
-		messageType, message, err := sw.conn.ReadMessage()
+		messageType, message, err := conn.ReadMessage()
 		if err != nil {
-			slog.Error("Error reading message from worker", "error", err)
+			if sw.isDone() {
+				slog.Debug("Worker connection closed", "workerName", sw.name)
+			} else {
+				slog.Error("Error reading message from worker", "workerName", sw.name, "error", err)
+			}
 			break
 		}
 
 		// Ping/pong sequence
 		if messageType == websocket.TextMessage && string(message) == "PING" {
 			slog.Debug("Received PING from worker, sending PONG")
-			err := sw.conn.WriteMessage(websocket.TextMessage, []byte("PONG"))
-			if err != nil {
+			if err := sw.send(outbound{messageType: websocket.TextMessage, data: []byte("PONG")}); err != nil {
 				slog.Error("Failed to send pong message", "error", err)
 			}
 			continue
@@ -55,63 +218,47 @@ func (sw *SessionWorker) workerMessageHandler() {
 			continue
 		}
 
-		go func() {
-			prefix, err := cartaHelpers.DecodeMessagePrefix(message)
-			if err != nil {
-				slog.Error("failed to unmarshal message", "error", err)
-				return
-			}
-			if prefix.IcdVersion != cartaHelpers.IcdVersion {
-				slog.Error("invalid ICD version", "version", prefix.IcdVersion)
-				return
-			}
-			slog.Debug("Received message from worker", "eventType", prefix.EventType)
-
-			var workerName string
-			if sw.fileRequest != nil {
-				workerName = fmt.Sprintf("worker:%d", sw.fileRequest.FileId)
-			} else {
-				workerName = "shared-worker"
-			}
-
-			// Special case for register viewer: send the open file payload once the worker is ready
-
-			slog.Debug("Received message from worker", "eventType", prefix.EventType, "workerName", workerName, "hasFileRequest", sw.fileRequest != nil)
-
-			if sw.fileRequest != nil && prefix.EventType == cartaDefinitions.EventType_REGISTER_VIEWER_ACK {
-				slog.Debug("Proxying OPEN_FILE message to worker after REGISTER_VIEWER_ACK", "workerName", workerName)
-				err = sw.proxyMessageToWorker(sw.fileRequest, cartaDefinitions.EventType_OPEN_FILE, sw.requestId)
-				if err != nil {
-					slog.Error("Error proxying open file message to worker", "error", err)
-				}
-			} else {
-				// TODO: We will often need to adjust responses here
-				// Pass the incoming message along to the client
-				sw.clientSendChan <- message
-			}
-		}()
+		// Handled inline so frames reach the client in the order the backend
+		// sent them and a slow client applies back-pressure to the backend.
+		sw.handleMessage(message)
 	}
+	sw.owner.workerLost(sw)
 }
 
-func (sw *SessionWorker) handleInit() {
-	sw.sendChan = make(chan []byte, 100)
-	// Start up the message sender and proxy handler
-	var workerName string
-	if sw.fileRequest != nil {
-		workerName = fmt.Sprintf("worker:%d", sw.fileRequest.FileId)
-	} else {
-		workerName = "shared-worker"
+func (sw *SessionWorker) handleMessage(message []byte) {
+	prefix, err := cartaHelpers.DecodeMessagePrefix(message)
+	if err != nil {
+		slog.Error("failed to unmarshal message", "error", err)
+		return
+	}
+	slog.Debug("Received message from worker", "eventType", prefix.EventType, "workerName", sw.name)
+
+	// Send the open file request once the backend has registered the viewer
+	if sw.fileRequest != nil && prefix.EventType == cartaDefinitions.EventType_REGISTER_VIEWER_ACK {
+		sw.openFileAfterRegistration(message[8:])
+		return
 	}
 
-	go sendHandler(sw.sendChan, sw.conn, workerName)
-	go sw.workerMessageHandler()
+	sw.owner.sendToClient(message)
 }
 
-func (sw *SessionWorker) disconnect() {
-	if sw.conn != nil {
-		helpers.CloseOrLog(sw.conn)
+// openFileAfterRegistration forwards the open request once the backend has
+// registered the viewer, or tells the client the file could not be opened if
+// the backend refused to register.
+func (sw *SessionWorker) openFileAfterRegistration(payload []byte) {
+	var ack cartaDefinitions.RegisterViewerAck
+	if err := proto.Unmarshal(payload, &ack); err != nil || !ack.GetSuccess() {
+		message := ack.GetMessage()
+		if err != nil {
+			message = "backend sent a malformed registration response"
+		}
+		slog.Error("Backend refused to register", "workerName", sw.name, "message", message)
+		sw.owner.dropWorker(sw)
+		sw.owner.sendAckToClient(&cartaDefinitions.OpenFileAck{Success: false, FileId: sw.fileRequest.GetFileId(), Message: message},
+			cartaDefinitions.EventType_OPEN_FILE_ACK, sw.requestId)
+		return
 	}
-	if sw.sendChan != nil {
-		close(sw.sendChan)
+	if err := sw.proxyMessageToWorker(sw.fileRequest, cartaDefinitions.EventType_OPEN_FILE, sw.requestId); err != nil {
+		slog.Error("Error proxying open file message to worker", "workerName", sw.name, "error", err)
 	}
 }

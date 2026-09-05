@@ -1,47 +1,34 @@
 package session
 
 import (
-	"context"
 	"fmt"
-	"log/slog"
-
-	"github.com/gorilla/websocket"
 
 	"github.com/CARTAvis/go-carta/pkg/cartaDefinitions"
-	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/spawnerHelpers"
 )
 
-// RegisterViewer is a special case as it is the first message we receive and is used to spin up the worker connection and set up the proxy handler
+// handleRegisterViewerMessage starts the session's shared backend and forwards
+// the registration to it.
 func (s *Session) handleRegisterViewerMessage(_ cartaDefinitions.EventType, requestId uint32, msg []byte) error {
 	var payload cartaDefinitions.RegisterViewer
-	err := s.checkAndParse(&payload, requestId, msg)
-	if err != nil {
+	if err := s.checkAndParse(&payload, requestId, msg); err != nil {
 		return fmt.Errorf("error parsing message: %v", err)
 	}
 
-	info, err := spawnerHelpers.RequestWorkerStartup(s.SpawnerAddress, s.User.Username)
-	if err != nil {
-		return fmt.Errorf("error starting worker: %v", err)
+	s.setRegisterViewer(&payload)
+	w := newSessionWorker(s, nil, requestId)
+	displaced, ok := s.setSharedWorker(w)
+	if !ok {
+		return fmt.Errorf("session ended during registration")
 	}
-	s.Info = info
-
-	slog.Info("Worker started for session", "workerId", info.WorkerId, "sessionId", payload.SessionId, "address", info.Address, "port", info.Port)
-	addr := fmt.Sprintf("ws://%s:%d", info.Address, info.Port)
-	wctx := s.Context
-	if wctx == nil {
-		wctx = context.Background()
+	if displaced != nil {
+		displaced.shutdown()
 	}
-	workerConn, _, err := websocket.DefaultDialer.DialContext(wctx, addr, nil)
-
-	if err != nil {
-		return fmt.Errorf("could not connect to worker at %s: %w", addr, err)
+	if err := w.proxyMessageToWorker(&payload, cartaDefinitions.EventType_REGISTER_VIEWER, requestId); err != nil {
+		return err
 	}
-
-	s.sharedWorker = &SessionWorker{
-		conn:           workerConn,
-		clientSendChan: s.clientSendChan,
-		fileRequest:    nil,
-	}
-	s.sharedWorker.handleInit()
-	return s.sharedWorker.proxyMessageToWorker(&payload, cartaDefinitions.EventType_REGISTER_VIEWER, requestId)
+	w.startAsync(func(err error) {
+		s.sendAckToClient(&cartaDefinitions.RegisterViewerAck{Success: false, Message: err.Error()},
+			cartaDefinitions.EventType_REGISTER_VIEWER_ACK, requestId)
+	})
+	return nil
 }

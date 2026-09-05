@@ -60,10 +60,7 @@ func NewWebSocketHandler(runtimeSpawnerAddress string, authEnabled bool, multiBa
 
 			if messageType == websocket.TextMessage && string(message) == "PING" {
 				slog.Debug("Received PING from client, sending PONG")
-				err := c.WriteMessage(websocket.TextMessage, []byte("PONG"))
-				if err != nil {
-					slog.Error("Failed to send pong message", "error", err)
-				}
+				s.SendText("PONG")
 				continue
 			}
 
@@ -72,12 +69,12 @@ func NewWebSocketHandler(runtimeSpawnerAddress string, authEnabled bool, multiBa
 				continue
 			}
 
-			go func() {
-				err := s.HandleMessage(message)
-				if err != nil {
-					slog.Warn("Failed to handle message", "error", err)
-				}
-			}()
+			// Handled in arrival order so a close cannot overtake the open
+			// it follows. Handlers that wait on a backend do so in their own
+			// goroutine.
+			if err := s.HandleMessage(message); err != nil {
+				slog.Warn("Failed to handle message", "error", err)
+			}
 		}
 
 		slog.Info("Client disconnected")

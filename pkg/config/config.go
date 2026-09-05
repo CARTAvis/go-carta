@@ -72,6 +72,9 @@ type SpawnerConfig struct {
 	Hostname    string        `mapstructure:"hostname"`
 	BaseDirTmpl string        `mapstructure:"base_dir_tmpl"`
 	TopLevelDir string        `mapstructure:"top_level_dir"`
+	// RunAsCurrentUser launches backends as the spawner's own user instead of
+	// sudo-ing to the requesting user.
+	RunAsCurrentUser bool `mapstructure:"run_as_current_user"`
 }
 
 // Config holds common configuration values shared across all services
@@ -121,6 +124,7 @@ func setSpawnerDefaults(v *viper.Viper) {
 	v.SetDefault("spawner.hostname", "")
 	v.SetDefault("spawner.base_dir_tmpl", "{{.home}}")
 	v.SetDefault("spawner.top_level_dir", "")
+	v.SetDefault("spawner.run_as_current_user", false)
 }
 
 func setDefaults(v *viper.Viper) {

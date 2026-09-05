@@ -7,9 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/CARTAvis/go-carta/pkg/shared"
 )
+
+// client bounds every call to the spawner so a stalled spawner cannot hang a
+// session's teardown. Starting a worker waits for the spawn and readiness
+// checks, so the bound is generous.
+var client = &http.Client{Timeout: 30 * time.Second}
 
 type ErrorResponse struct {
 	ErrorMessage string `json:"msg"`
@@ -37,7 +43,7 @@ func CountWorkers(spawnerAddress string) (int, error) {
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return -1, err
 	}
@@ -77,7 +83,7 @@ func GetWorkerStatus(workerId string, spawnerAddress string) (WorkerStatus, erro
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return WorkerStatus{}, err
 	}
@@ -114,7 +120,7 @@ func RequestWorkerStartup(spawnerAddress string, username string) (WorkerInfo, e
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return WorkerInfo{}, err
 	}
@@ -151,7 +157,7 @@ func RequestWorkerShutdown(workerId string, spawnerAddress string) error {
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

@@ -147,3 +147,10 @@ base_dir_tmpl = "{{.home}}"
 
 # Top level directory for user data access
 top_level_dir = "/"
+
+# Launch the backend directly as the user running the spawner, instead of
+# sudo-ing to the requested user. Use this for single-user/local deployments
+# where the spawner is not run as root. When true the requested username need
+# not be a real OS account; {{.home}} resolves to the spawner user's home.
+# Default: false.
+run_as_current_user = false

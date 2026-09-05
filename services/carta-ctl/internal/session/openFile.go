@@ -4,47 +4,35 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/gorilla/websocket"
-
 	"github.com/CARTAvis/go-carta/pkg/cartaDefinitions"
-	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/spawnerHelpers"
 )
 
-// OpenFile needs to spin up a new worker and proxy the message to it
+// handleOpenFile starts a dedicated backend for the file. The worker is
+// registered and its registration queued before the backend is started, so
+// nothing overtakes the registration and a close arriving meanwhile is
+// honoured. The worker forwards the open request once the backend
+// acknowledges it.
 func (s *Session) handleOpenFile(_ cartaDefinitions.EventType, requestId uint32, msg []byte) error {
 	var payload cartaDefinitions.OpenFile
-	err := s.checkAndParse(&payload, requestId, msg)
-	if err != nil {
+	if err := s.checkAndParse(&payload, requestId, msg); err != nil {
 		return fmt.Errorf("error parsing message: %v", err)
 	}
 
-	info, err := spawnerHelpers.RequestWorkerStartup(s.SpawnerAddress, s.User.Username)
-	if err != nil {
-		return fmt.Errorf("error starting worker: %v", err)
+	w := newSessionWorker(s, &payload, requestId)
+	displaced, ok := s.setFileWorker(payload.FileId, w)
+	if !ok {
+		return fmt.Errorf("session ended while opening file %d", payload.FileId)
 	}
-
-	slog.Info("Worker started", "workerId", info.WorkerId, "fileId", payload.FileId, "address", info.Address, "port", info.Port)
-	addr := fmt.Sprintf("ws://%s:%d", info.Address, info.Port)
-	workerConn, _, err := websocket.DefaultDialer.DialContext(s.Context, addr, nil)
-	if err != nil {
-		return fmt.Errorf("could not connect to worker at %s: %w", addr, err)
+	if displaced != nil {
+		slog.Warn("Replacing backend for a file that is already open", "fileId", payload.FileId)
+		displaced.shutdown()
 	}
-
-	fileWorker := &SessionWorker{
-		requestId:      requestId,
-		fileRequest:    &payload,
-		conn:           workerConn,
-		clientSendChan: s.clientSendChan,
+	if err := w.proxyMessageToWorker(s.clientRegistration(), cartaDefinitions.EventType_REGISTER_VIEWER, requestId); err != nil {
+		return err
 	}
-	fileWorker.handleInit()
-
-	if s.fileMap == nil {
-		s.fileMap = make(map[int32]*SessionWorker)
-	}
-
-	s.fileMap[payload.FileId] = fileWorker
-
-	// We  need to first pass through a register viewer message, and then wait for the ack before sending through the open file message
-	// File opening is handled by workerMessageHandler
-	return fileWorker.proxyMessageToWorker(&payload, cartaDefinitions.EventType_REGISTER_VIEWER, requestId)
+	w.startAsync(func(err error) {
+		s.sendAckToClient(&cartaDefinitions.OpenFileAck{Success: false, FileId: payload.FileId, Message: err.Error()},
+			cartaDefinitions.EventType_OPEN_FILE_ACK, requestId)
+	})
+	return nil
 }
