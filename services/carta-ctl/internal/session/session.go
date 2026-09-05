@@ -30,16 +30,25 @@ type Session struct {
 	// maps incoming file IDs to the internal IDs of the workers
 	fileMap      map[int32]*SessionWorker
 	sharedWorker *SessionWorker
+
+	// multiBackend serves each open file from its own backend process.
+	multiBackend bool
 }
 
-var handlerMap = map[cartaDefinitions.EventType]func(*Session, cartaDefinitions.EventType, uint32, []byte) error{
+type messageHandler func(*Session, cartaDefinitions.EventType, uint32, []byte) error
+
+var handlerMap = map[cartaDefinitions.EventType]messageHandler{
 	cartaDefinitions.EventType_REGISTER_VIEWER: (*Session).handleRegisterViewerMessage,
-	cartaDefinitions.EventType_OPEN_FILE:       (*Session).handleOpenFile,
-	// TODO: We need to handle CLOSE_FILE separately as well, because it will require shutting down a worker
-	cartaDefinitions.EventType_EMPTY_EVENT: (*Session).handleStatusMessage,
+	cartaDefinitions.EventType_EMPTY_EVENT:     (*Session).handleStatusMessage,
 }
 
-func NewSession(conn *websocket.Conn, workerAddr string, user *auth.User) *Session {
+// multiBackendHandlerMap holds handlers that only apply when each file has its own backend.
+var multiBackendHandlerMap = map[cartaDefinitions.EventType]messageHandler{
+	cartaDefinitions.EventType_OPEN_FILE: (*Session).handleOpenFile,
+	// TODO: We need to handle CLOSE_FILE separately as well, because it will require shutting down a worker
+}
+
+func NewSession(conn *websocket.Conn, workerAddr string, user *auth.User, multiBackend bool) *Session {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Session{
 		WebSocket:      conn,
@@ -47,7 +56,19 @@ func NewSession(conn *websocket.Conn, workerAddr string, user *auth.User) *Sessi
 		User:           user,
 		Context:        ctx,
 		Cancel:         cancel,
+		multiBackend:   multiBackend,
 	}
+}
+
+func (s *Session) lookupHandler(eventType cartaDefinitions.EventType) (messageHandler, bool) {
+	if handler, ok := handlerMap[eventType]; ok {
+		return handler, true
+	}
+	if s.multiBackend {
+		handler, ok := multiBackendHandlerMap[eventType]
+		return handler, ok
+	}
+	return nil, false
 }
 
 func (s *Session) checkAndParse(msg proto.Message, requestId uint32, rawMsg []byte) error {
@@ -86,7 +107,7 @@ func (s *Session) HandleMessage(msg []byte) error {
 		return fmt.Errorf("failed to unmarshal message: %v", err)
 	}
 
-	handler, ok := handlerMap[prefix.EventType]
+	handler, ok := s.lookupHandler(prefix.EventType)
 	if !ok {
 		// Any messages that don't have a specific handler are simply proxied to the worker
 		err = s.handleProxiedMessage(prefix.EventType, prefix.RequestId, msg[8:])

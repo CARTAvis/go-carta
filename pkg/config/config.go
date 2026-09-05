@@ -62,6 +62,7 @@ type ControllerConfig struct {
 	AuthMode           AuthMode        `mapstructure:"auth_mode"`
 	DBConnectionString string          `mapstructure:"db_conn_string"`
 	ApiPrefix          string          `mapstructure:"api_prefix"`
+	MultiBackend       bool            `mapstructure:"multi_backend"`
 }
 
 type SpawnerConfig struct {
@@ -98,6 +99,7 @@ func setControllerDefaults(v *viper.Viper) {
 	v.SetDefault("controller.oidc.app_url", "")
 	v.SetDefault("controller.db_conn_string", "")
 	v.SetDefault("controller.api_prefix", "/api")
+	v.SetDefault("controller.multi_backend", false)
 
 	v.SetDefault("controller.login_page.title", "CARTA")
 	v.SetDefault("controller.login_page.welcome_text", "Welcome to the CARTA server.")

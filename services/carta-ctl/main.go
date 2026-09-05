@@ -49,6 +49,7 @@ func main() {
 	pflag.String("auth_mode", "none", "Authentication mode: none|pam|oidc|both")
 	pflag.String("override", "", "Override simple config values (string, int, bool) as comma-separated key:value pairs (e.g., controller.port:9000,log_level:debug)")
 	pflag.String("db_conn_string", "", "Database connection string")
+	pflag.Bool("multi_backend", false, "Serve each open file from its own backend process")
 
 	pflag.Parse()
 
@@ -66,6 +67,7 @@ func main() {
 		"frontend_dir":    "controller.frontend_dir",
 		"auth_mode":       "controller.auth_mode",
 		"db_conn_string":  "controller.db_conn_string",
+		"multi_backend":   "controller.multi_backend",
 	})
 
 	cfg := config.Load(pflag.Lookup("config").Value.String(), pflag.Lookup("override").Value.String())
@@ -81,6 +83,7 @@ func main() {
 	if runtimeSpawnerAddress == "" {
 		runtimeSpawnerAddress = fmt.Sprintf("http://%s:%d", cfg.Spawner.Hostname, cfg.Spawner.Port)
 	}
+	slog.Info("Backend mode", "multiBackend", cfg.Controller.MultiBackend)
 
 	slog.Debug("Configuring auth", "authMode", cfg.Controller.AuthMode)
 
@@ -164,7 +167,7 @@ func main() {
 
 		slog.Info("Serving carta_frontend", "dirname", cfg.Controller.FrontendDir)
 		fs := http.FileServer(http.Dir(cfg.Controller.FrontendDir))
-		wsHandler := ctlhttp.NewWebSocketHandler(runtimeSpawnerAddress, cfg.Controller.AuthMode != config.AuthNone)
+		wsHandler := ctlhttp.NewWebSocketHandler(runtimeSpawnerAddress, cfg.Controller.AuthMode != config.AuthNone, cfg.Controller.MultiBackend)
 
 		if oidcAuth != nil && (cfg.Controller.AuthMode == config.AuthOIDC || cfg.Controller.AuthMode == config.AuthBoth) {
 			http.Handle("/api/auth/oidc_login", http.HandlerFunc(oidcAuth.LoginHandler))
