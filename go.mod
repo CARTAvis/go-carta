@@ -1,6 +1,6 @@
 module github.com/CARTAvis/go-carta
 
-go 1.26.0
+go 1.27
 
 require (
 	github.com/coreos/go-oidc/v3 v3.17.0
