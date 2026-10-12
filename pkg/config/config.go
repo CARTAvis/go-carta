@@ -43,6 +43,12 @@ type TokenConfig struct {
 	RefreshTokenAge    string `mapstructure:"refresh_token_age"`
 }
 
+type DeviceAuthConfig struct {
+	Lifetime    string `mapstructure:"lifetime"`
+	MinInterval string `mapstructure:"min_interval"`
+	PublicURL   string `mapstructure:"public_url"`
+}
+
 type LoginPageConfig struct {
 	Title       string `mapstructure:"title"`
 	WelcomeText string `mapstructure:"welcome_text"`
@@ -51,17 +57,18 @@ type LoginPageConfig struct {
 }
 
 type ControllerConfig struct {
-	OIDC               OIDCConfig      `mapstructure:"oidc"`
-	PAM                PAMConfig       `mapstructure:"pam"`
-	TokenConfig        TokenConfig     `mapstructure:"token_config"`
-	LoginPage          LoginPageConfig `mapstructure:"login_page"`
-	Port               int             `mapstructure:"port"`
-	Hostname           string          `mapstructure:"hostname"`
-	FrontendDir        string          `mapstructure:"frontend_dir"`
-	SpawnerAddress     string          `mapstructure:"spawner_address"`
-	AuthMode           AuthMode        `mapstructure:"auth_mode"`
-	DBConnectionString string          `mapstructure:"db_conn_string"`
-	ApiPrefix          string          `mapstructure:"api_prefix"`
+	OIDC               OIDCConfig       `mapstructure:"oidc"`
+	PAM                PAMConfig        `mapstructure:"pam"`
+	TokenConfig        TokenConfig      `mapstructure:"token_config"`
+	LoginPage          LoginPageConfig  `mapstructure:"login_page"`
+	DeviceAuth         DeviceAuthConfig `mapstructure:"device_auth"`
+	Port               int              `mapstructure:"port"`
+	Hostname           string           `mapstructure:"hostname"`
+	FrontendDir        string           `mapstructure:"frontend_dir"`
+	SpawnerAddress     string           `mapstructure:"spawner_address"`
+	AuthMode           AuthMode         `mapstructure:"auth_mode"`
+	DBConnectionString string           `mapstructure:"db_conn_string"`
+	ApiPrefix          string           `mapstructure:"api_prefix"`
 }
 
 type SpawnerConfig struct {
@@ -109,6 +116,10 @@ func setControllerDefaults(v *viper.Viper) {
 	v.SetDefault("controller.token_config.issuer", "carta-ctl")
 	v.SetDefault("controller.token_config.access_token_age", "10m")
 	v.SetDefault("controller.token_config.refresh_token_age", "24h")
+
+	v.SetDefault("controller.device_auth.lifetime", "10m")
+	v.SetDefault("controller.device_auth.min_interval", "5s")
+	v.SetDefault("controller.device_auth.public_url", "")
 
 }
 

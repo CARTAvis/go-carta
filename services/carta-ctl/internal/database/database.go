@@ -9,11 +9,13 @@ import (
 	"unicode/utf8"
 
 	"database/sql"
+
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 
 	"embed"
 	"encoding/json"
+
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth"

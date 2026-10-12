@@ -145,6 +145,18 @@ func main() {
 			ConnString: cfg.Controller.DBConnectionString,
 		}
 		db.InitDb()
+		// Unauthenticated by design: this starts a login flow.
+		if cfg.Controller.AuthMode != config.AuthNone {
+			deviceInit, err := auth.DeviceInitHandler(&db, cfg.Controller.DeviceAuth)
+			if err != nil {
+				slog.Error("Failed to configure device authorization", "error", err)
+				os.Exit(1)
+			}
+			http.Handle(auth.DeviceVerifyPath, auth.DeviceLinkPageHandler(cfg))
+			http.Handle("/api/auth/device_init", ctlhttp.NoCache(deviceInit))
+			http.Handle("/api/auth/device_poll", ctlhttp.NoCache(auth.DevicePollHandler()))
+			http.Handle("/api/auth/device_link", ctlhttp.NoCache(auth.DeviceLinkHandler()))
+		}
 		http.Handle(
 			"/api/database/",
 			ctlhttp.NoCache(

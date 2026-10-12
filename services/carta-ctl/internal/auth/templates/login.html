@@ -202,12 +202,17 @@
         <p class="welcome">{{ .WelcomeText }}</p>
         {{ end }}
 
+        {{ if .DeviceCode }}
+        <p class="welcome">Sign in to link your device to your account.</p>
+        {{ end }}
+
         {{ if .Error }}
         <p class="error">{{ .Error }}</p>
         {{ end }}
 
         {{ if .ShowPAM }}
         <form method="POST" action="{{ .PAMAction }}">
+          {{ if .DeviceCode }}<input type="hidden" name="device_code" value="{{ .DeviceCode }}" />{{ end }}
           <div class="field">
             <label for="username">Username</label>
             <input id="username" name="username" placeholder="Username" autocomplete="username" required />

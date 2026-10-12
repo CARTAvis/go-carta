@@ -49,6 +49,7 @@ type LoginPageData struct {
 	PAMAction   string
 	OIDCAction  string
 	Error       string
+	DeviceCode  string
 }
 
 // LoginPageHandler returns an http.Handler that renders the unified login page.
@@ -127,5 +128,58 @@ func ServeSiteBanner(path string) http.Handler {
 			return
 		}
 		http.ServeFile(w, r, path)
+	})
+}
+
+// DeviceLinkPageHandler renders the login page for the device flow. The device
+// code from the URL is carried through as a hidden field and submitted to
+// /api/auth/device_link along with the credentials.
+func DeviceLinkPageHandler(cfg *config.Config) http.Handler {
+	lp := cfg.Controller.LoginPage
+	authMode := cfg.Controller.AuthMode
+	// Only credential-based (PAM) linking is supported by the device flow so far.
+	showPAM := authMode == config.AuthPAM || authMode == config.AuthBoth
+
+	hasBanner := false
+	if lp.SiteBanner != "" {
+		if _, err := os.Stat(lp.SiteBanner); err == nil {
+			hasBanner = true
+		}
+	}
+
+	title := lp.Title
+	if title == "" {
+		title = "CARTA"
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		deviceCode := r.URL.Query().Get("code")
+		if !validDeviceCode(deviceCode) {
+			http.Error(w, "Missing or invalid device code", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		data := LoginPageData{
+			Title:       title,
+			WelcomeText: lp.WelcomeText,
+			SupportText: sanitizeSupportText(lp.SupportText),
+			HasBanner:   hasBanner,
+			BannerURL:   "/login/banner",
+			ShowPAM:     showPAM,
+			PAMAction:   DeviceLinkAPIPath,
+			Error:       r.URL.Query().Get("error"),
+			DeviceCode:  deviceCode,
+		}
+		if err := loginTmpl.Execute(w, data); err != nil {
+			slog.Error("Failed to render device link page", "error", err)
+		}
 	})
 }

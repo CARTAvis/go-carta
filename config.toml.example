@@ -117,6 +117,23 @@ access_token_age = "10m"
 # Lifetime of refresh tokens.
 refresh_token_age = "24h"
 
+# ----------------------------------------------------------------------------
+# Device Authorization Configuration
+# ----------------------------------------------------------------------------
+[controller.device_auth]
+
+# How long a pending device login (and its device code) remains valid.
+lifetime = "10m"
+
+# Minimum time a client must wait between polls for the login result.
+min_interval = "5s"
+
+# Public base URL of this server, used to build the verification link shown to
+# the user (e.g. "https://carta.example.org"). Must be an absolute http(s) URL.
+# If empty, the URL is derived from the incoming request's Host header, which
+# is less safe behind proxies and should be avoided in production.
+public_url = ""
+
 # ============================================================================
 # Spawner Configuration
 # ============================================================================
