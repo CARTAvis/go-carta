@@ -155,7 +155,7 @@ func main() {
 			http.Handle(auth.DeviceVerifyPath, auth.DeviceLinkPageHandler(cfg))
 			http.Handle("/api/auth/device_init", ctlhttp.NoCache(deviceInit))
 			http.Handle("/api/auth/device_poll", ctlhttp.NoCache(auth.DevicePollHandler()))
-			http.Handle("/api/auth/device_link", ctlhttp.NoCache(auth.DeviceLinkHandler()))
+			http.Handle("/api/auth/device_link", ctlhttp.NoCache(auth.DeviceLinkHandler(&db, pamAuth)))
 		}
 		http.Handle(
 			"/api/database/",

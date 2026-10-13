@@ -108,6 +108,38 @@ func (h *DbConfig) EnsureTables() error {
 
 	CREATE INDEX IF NOT EXISTS idx_workspaces_username
     ON workspaces (username);
+
+	CREATE TABLE IF NOT EXISTS auth_pending (
+		poll_handle       TEXT        PRIMARY KEY,
+		device_code       TEXT        NOT NULL,
+		expires_at        TIMESTAMPTZ NOT NULL,
+		min_interval_secs INT         NOT NULL DEFAULT 5,
+		last_polled_at    TIMESTAMPTZ
+	);
+
+	-- Set once the user has authenticated and linked the device code to their account
+	ALTER TABLE auth_pending ADD COLUMN IF NOT EXISTS username  TEXT;
+	ALTER TABLE auth_pending ADD COLUMN IF NOT EXISTS linked_at TIMESTAMPTZ;
+
+	CREATE INDEX IF NOT EXISTS idx_auth_pending_device_code
+	ON auth_pending (device_code);
+
+	CREATE TABLE IF NOT EXISTS auth_sessions (
+		session_token           TEXT        PRIMARY KEY,
+		username                TEXT        NOT NULL,
+		oidc_refresh_token      BYTEA       NOT NULL,  -- AES-GCM encrypted
+		oidc_access_expiry      TIMESTAMPTZ,
+		created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		expires_at              TIMESTAMPTZ NOT NULL,
+		last_used_at            TIMESTAMPTZ,
+		revoked                 BOOLEAN     NOT NULL DEFAULT FALSE
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_auth_sessions_username
+	ON auth_sessions (username);
+
+	CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at
+	ON auth_sessions (expires_at) WHERE NOT revoked;
     `
 
 	if _, err := h.db.Exec(schema); err != nil {

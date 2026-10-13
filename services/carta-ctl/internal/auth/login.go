@@ -22,6 +22,10 @@ var loginTmpl = template.Must(
 	template.ParseFS(templates, "templates/login.html"),
 )
 
+var deviceLinkedTmpl = template.Must(
+	template.ParseFS(templates, "templates/device_linked.html"),
+)
+
 var supportTextPolicy = func() *bluemonday.Policy {
 	p := bluemonday.UGCPolicy()
 	p.RequireParseableURLs(true)

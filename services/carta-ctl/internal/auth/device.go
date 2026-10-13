@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -42,6 +43,13 @@ type PendingAuthStore interface {
 	PurgeExpiredPendingAuth() error
 	// CreatePendingAuth stores a new pending device login.
 	CreatePendingAuth(pollHandle, deviceCode string, expiresAt time.Time, minIntervalSecs int) error
+	// LinkPendingAuth links an unexpired, unlinked device code to a user, reporting whether it did so.
+	LinkPendingAuth(deviceCode, username string) (bool, error)
+}
+
+// CredentialAuthenticator verifies a username and password.
+type CredentialAuthenticator interface {
+	AuthenticateCredentials(ctx context.Context, username, password string) (*User, error)
 }
 
 // randomToken returns a URL-safe random string with n bytes of entropy.
@@ -158,5 +166,70 @@ func notImplementedHandler(name string) http.Handler {
 // DevicePollHandler is a placeholder for the endpoint clients poll with their poll_handle.
 func DevicePollHandler() http.Handler { return notImplementedHandler("device_poll") }
 
-// DeviceLinkHandler is a placeholder for the endpoint that links a device_code to an authenticated user.
-func DeviceLinkHandler() http.Handler { return notImplementedHandler("device_link") }
+func redirectToDeviceLinkWithError(w http.ResponseWriter, r *http.Request, code, message string) {
+	v := url.Values{}
+	v.Set("code", code)
+	v.Set("error", message)
+	http.Redirect(w, r, DeviceVerifyPath+"?"+v.Encode(), http.StatusSeeOther)
+}
+
+// DeviceLinkHandler handles the submission of the /device_link page: it
+// authenticates the user's credentials and links the device code to them.
+// The linked session is later collected by the polling client.
+func DeviceLinkHandler(store PendingAuthStore, authenticator CredentialAuthenticator) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		if authenticator == nil {
+			writeJSONError(w, http.StatusNotImplemented, "Credential login is not enabled")
+			return
+		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+		if err := r.ParseForm(); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "Invalid request")
+			return
+		}
+
+		code := r.PostForm.Get("device_code")
+		if !validDeviceCode(code) {
+			writeJSONError(w, http.StatusBadRequest, "Missing or invalid device code")
+			return
+		}
+
+		username := r.PostForm.Get("username")
+		password := r.PostForm.Get("password")
+		if username == "" || password == "" {
+			redirectToDeviceLinkWithError(w, r, code, "Please enter both username and password")
+			return
+		}
+
+		user, err := authenticator.AuthenticateCredentials(r.Context(), username, password)
+		if err != nil {
+			slog.Warn("Device link login failed", "username", username, "error", err)
+			redirectToDeviceLinkWithError(w, r, code, "Invalid username or password")
+			return
+		}
+
+		linked, err := store.LinkPendingAuth(code, user.Username)
+		if err != nil {
+			slog.Error("Failed to link device code", "username", user.Username, "error", err)
+			writeJSONError(w, http.StatusInternalServerError, "Internal server error")
+			return
+		}
+		if !linked {
+			redirectToDeviceLinkWithError(w, r, code, "This device code is invalid, expired, or already used")
+			return
+		}
+
+		slog.Info("Linked device code to user", "username", user.Username)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		if err := deviceLinkedTmpl.Execute(w, map[string]string{"Username": user.Username}); err != nil {
+			slog.Error("Failed to render device linked page", "error", err)
+		}
+	})
+}
