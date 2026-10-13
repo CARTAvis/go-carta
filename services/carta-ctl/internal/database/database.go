@@ -114,18 +114,21 @@ func (h *DbConfig) EnsureTables() error {
 		device_code       TEXT        NOT NULL,
 		expires_at        TIMESTAMPTZ NOT NULL,
 		min_interval_secs INT         NOT NULL DEFAULT 5,
-		last_polled_at    TIMESTAMPTZ
-	);
+		last_polled_at    TIMESTAMPTZ,
 
-	-- Set once the user has authenticated and linked the device code to their account
-	ALTER TABLE auth_pending ADD COLUMN IF NOT EXISTS username  TEXT;
-	ALTER TABLE auth_pending ADD COLUMN IF NOT EXISTS linked_at TIMESTAMPTZ;
+		-- Set once the user has authenticated and linked the device code to their account
+		username          TEXT,
+		linked_at         TIMESTAMPTZ
+	);
 
 	CREATE INDEX IF NOT EXISTS idx_auth_pending_device_code
 	ON auth_pending (device_code);
 
 	CREATE TABLE IF NOT EXISTS auth_sessions (
 		session_token           TEXT        PRIMARY KEY,
+
+		-- Public reference to the session, safe to embed in access tokens and logs
+		session_id              UUID        NOT NULL DEFAULT gen_random_uuid(),
 		username                TEXT        NOT NULL,
 		oidc_refresh_token      BYTEA       NOT NULL,  -- AES-GCM encrypted
 		oidc_access_expiry      TIMESTAMPTZ,
@@ -134,6 +137,9 @@ func (h *DbConfig) EnsureTables() error {
 		last_used_at            TIMESTAMPTZ,
 		revoked                 BOOLEAN     NOT NULL DEFAULT FALSE
 	);
+
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_sessions_session_id
+	ON auth_sessions (session_id);
 
 	CREATE INDEX IF NOT EXISTS idx_auth_sessions_username
 	ON auth_sessions (username);
