@@ -109,37 +109,35 @@ func (h *DbConfig) EnsureTables() error {
 	CREATE INDEX IF NOT EXISTS idx_workspaces_username
     ON workspaces (username);
 
+	-- key_fingerprint is the base64url SHA-256 of the client's raw Ed25519 public key.
+	-- It identifies the login attempt; possession of the private key authenticates the client.
 	CREATE TABLE IF NOT EXISTS auth_pending (
-		poll_handle       TEXT        PRIMARY KEY,
-		device_code       TEXT        NOT NULL,
+		key_fingerprint   TEXT        PRIMARY KEY,
+		client_public_key TEXT        NOT NULL,
 		expires_at        TIMESTAMPTZ NOT NULL,
-		min_interval_secs INT         NOT NULL DEFAULT 5,
-		last_polled_at    TIMESTAMPTZ,
 
-		-- Set once the user has authenticated and linked the device code to their account
+		-- Client timestamp of the last accepted poll (enforces interval and prevents replay)
+		last_poll_ts      BIGINT,
+
+		-- Set once the user has authenticated and linked the key to their account
 		username          TEXT,
 		linked_at         TIMESTAMPTZ
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_auth_pending_device_code
-	ON auth_pending (device_code);
-
 	CREATE TABLE IF NOT EXISTS auth_sessions (
-		session_token           TEXT        PRIMARY KEY,
-
-		-- Public reference to the session, safe to embed in access tokens and logs
-		session_id              UUID        NOT NULL DEFAULT gen_random_uuid(),
+		key_fingerprint         TEXT        PRIMARY KEY,
+		client_public_key       TEXT        NOT NULL,
 		username                TEXT        NOT NULL,
-		oidc_refresh_token      BYTEA       NOT NULL,  -- AES-GCM encrypted
+		oidc_refresh_token      BYTEA,                 -- AES-GCM encrypted; NULL for non-OIDC sessions
 		oidc_access_expiry      TIMESTAMPTZ,
 		created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		expires_at              TIMESTAMPTZ NOT NULL,
 		last_used_at            TIMESTAMPTZ,
+
+		-- Client timestamp of the last accepted signed request (prevents replay)
+		last_request_ts         BIGINT,
 		revoked                 BOOLEAN     NOT NULL DEFAULT FALSE
 	);
-
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_sessions_session_id
-	ON auth_sessions (session_id);
 
 	CREATE INDEX IF NOT EXISTS idx_auth_sessions_username
 	ON auth_sessions (username);

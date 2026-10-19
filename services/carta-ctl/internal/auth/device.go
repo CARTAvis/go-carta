@@ -2,9 +2,11 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -22,9 +24,29 @@ const (
 	DeviceLinkAPIPath = "/api/auth/device_link"
 )
 
-// validDeviceCode checks that a device code looks like one we generate (base64url, bounded length).
-func validDeviceCode(code string) bool {
-	if len(code) == 0 || len(code) > 64 {
+// ErrKeyAlreadyRegistered is returned when a public key already has a pending login.
+var ErrKeyAlreadyRegistered = errors.New("public key already registered")
+
+// fingerprintLen is the length of a base64url (unpadded) SHA-256 digest.
+const fingerprintLen = 43
+
+// KeyFingerprint returns the base64url SHA-256 of a raw Ed25519 public key.
+func KeyFingerprint(rawPublicKey []byte) string {
+	sum := sha256.Sum256(rawPublicKey)
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// FingerprintPrefix is the short form shown to users to confirm they are linking the right device.
+func FingerprintPrefix(fingerprint string) string {
+	if len(fingerprint) < 8 {
+		return fingerprint
+	}
+	return fingerprint[:8]
+}
+
+// validFingerprint checks that a value has the shape of a key fingerprint.
+func validFingerprint(code string) bool {
+	if len(code) != fingerprintLen {
 		return false
 	}
 	for _, c := range code {
@@ -41,24 +63,15 @@ func validDeviceCode(code string) bool {
 type PendingAuthStore interface {
 	// PurgeExpiredPendingAuth removes pending records that have expired.
 	PurgeExpiredPendingAuth() error
-	// CreatePendingAuth stores a new pending device login.
-	CreatePendingAuth(pollHandle, deviceCode string, expiresAt time.Time, minIntervalSecs int) error
-	// LinkPendingAuth links an unexpired, unlinked device code to a user, reporting whether it did so.
-	LinkPendingAuth(deviceCode, username string) (bool, error)
+	// CreatePendingAuth stores a new pending device login, keyed by the fingerprint of the client's public key.
+	CreatePendingAuth(keyFingerprint, clientPublicKey string, expiresAt time.Time) error
+	// LinkPendingAuth links an unexpired, unlinked login to a user, reporting whether it did so.
+	LinkPendingAuth(keyFingerprint, username string) (bool, error)
 }
 
 // CredentialAuthenticator verifies a username and password.
 type CredentialAuthenticator interface {
 	AuthenticateCredentials(ctx context.Context, username, password string) (*User, error)
-}
-
-// randomToken returns a URL-safe random string with n bytes of entropy.
-func randomToken(n int) (string, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // requestOrigin derives the origin from the request. Used only when no public URL is configured.
@@ -81,9 +94,9 @@ func writeJSONError(w http.ResponseWriter, status int, message string) {
 	}
 }
 
-// DeviceInitHandler starts a device-style login flow. It creates a pending
-// record and returns a secret poll_handle (kept by the client) and a device_code
-// (embedded in the verification URL the user opens in a browser).
+// DeviceInitHandler starts a device-style login flow. The client registers an
+// Ed25519 public key; the base64url SHA-256 of that key (its fingerprint) identifies
+// the pending login and is embedded in the verification URL the user opens in a browser.
 func DeviceInitHandler(store PendingAuthStore, cfg config.DeviceAuthConfig) (http.Handler, error) {
 	lifetime, err := time.ParseDuration(cfg.Lifetime)
 	if err != nil || lifetime <= 0 {
@@ -112,25 +125,34 @@ func DeviceInitHandler(store PendingAuthStore, cfg config.DeviceAuthConfig) (htt
 			return
 		}
 
-		pollHandle, err := randomToken(32)
-		if err != nil {
-			slog.Error("Failed to generate poll handle", "err", err)
-			writeJSONError(w, http.StatusInternalServerError, "Internal server error")
+		// The client's Ed25519 public key is bound to this login up front, so only
+		// the holder of the private key can later collect the session.
+		r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+		var req struct {
+			PublicKey string `json:"public_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "Request body must be JSON containing public_key")
 			return
 		}
-		deviceCode, err := randomToken(24)
-		if err != nil {
-			slog.Error("Failed to generate device code", "err", err)
-			writeJSONError(w, http.StatusInternalServerError, "Internal server error")
+		keyBytes, err := base64.RawURLEncoding.DecodeString(req.PublicKey)
+		if err != nil || len(keyBytes) != ed25519.PublicKeySize {
+			writeJSONError(w, http.StatusBadRequest, "public_key must be a base64url (unpadded) Ed25519 public key")
 			return
 		}
+
+		fingerprint := KeyFingerprint(keyBytes)
 
 		// Purge stale records so unauthenticated calls can't grow the table forever.
 		if err := store.PurgeExpiredPendingAuth(); err != nil {
 			slog.Warn("Failed to purge expired pending auth records", "err", err)
 		}
 
-		if err := store.CreatePendingAuth(pollHandle, deviceCode, time.Now().Add(lifetime), minIntervalSecs); err != nil {
+		if err := store.CreatePendingAuth(fingerprint, req.PublicKey, time.Now().Add(lifetime)); err != nil {
+			if errors.Is(err, ErrKeyAlreadyRegistered) {
+				writeJSONError(w, http.StatusConflict, "This public key is already registered; generate a new keypair")
+				return
+			}
 			slog.Error("Failed to create pending auth record", "err", err)
 			writeJSONError(w, http.StatusInternalServerError, "Internal server error")
 			return
@@ -144,9 +166,9 @@ func DeviceInitHandler(store PendingAuthStore, cfg config.DeviceAuthConfig) (htt
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		resp := map[string]any{
-			"poll_handle":      pollHandle,
-			"device_code":      deviceCode,
-			"verification_uri": base + DeviceVerifyPath + "?code=" + url.QueryEscape(deviceCode),
+			"key_fingerprint":  fingerprint,
+			"confirm_code":     FingerprintPrefix(fingerprint),
+			"verification_uri": base + DeviceVerifyPath + "?code=" + url.QueryEscape(fingerprint),
 			"expires_in":       int(lifetime.Seconds()),
 			"interval":         minIntervalSecs,
 		}
@@ -163,7 +185,7 @@ func notImplementedHandler(name string) http.Handler {
 	})
 }
 
-// DevicePollHandler is a placeholder for the endpoint clients poll with their poll_handle.
+// DevicePollHandler is a placeholder for the endpoint clients poll, signing with their registered key.
 func DevicePollHandler() http.Handler { return notImplementedHandler("device_poll") }
 
 func redirectToDeviceLinkWithError(w http.ResponseWriter, r *http.Request, code, message string) {
@@ -194,9 +216,14 @@ func DeviceLinkHandler(store PendingAuthStore, authenticator CredentialAuthentic
 			return
 		}
 
-		code := r.PostForm.Get("device_code")
-		if !validDeviceCode(code) {
-			writeJSONError(w, http.StatusBadRequest, "Missing or invalid device code")
+		code := r.PostForm.Get("code")
+		if !validFingerprint(code) {
+			writeJSONError(w, http.StatusBadRequest, "Missing or invalid code")
+			return
+		}
+
+		if r.PostForm.Get("confirm") != "yes" {
+			redirectToDeviceLinkWithError(w, r, code, "Please confirm that the code matches the one shown in your terminal")
 			return
 		}
 
@@ -216,16 +243,16 @@ func DeviceLinkHandler(store PendingAuthStore, authenticator CredentialAuthentic
 
 		linked, err := store.LinkPendingAuth(code, user.Username)
 		if err != nil {
-			slog.Error("Failed to link device code", "username", user.Username, "error", err)
+			slog.Error("Failed to link login", "username", user.Username, "error", err)
 			writeJSONError(w, http.StatusInternalServerError, "Internal server error")
 			return
 		}
 		if !linked {
-			redirectToDeviceLinkWithError(w, r, code, "This device code is invalid, expired, or already used")
+			redirectToDeviceLinkWithError(w, r, code, "This login code is invalid, expired, or already used")
 			return
 		}
 
-		slog.Info("Linked device code to user", "username", user.Username)
+		slog.Info("Linked device login to user", "username", user.Username)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		if err := deviceLinkedTmpl.Execute(w, map[string]string{"Username": user.Username}); err != nil {

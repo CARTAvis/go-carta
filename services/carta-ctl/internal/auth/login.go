@@ -54,6 +54,7 @@ type LoginPageData struct {
 	OIDCAction  string
 	Error       string
 	DeviceCode  string
+	ConfirmCode string
 }
 
 // LoginPageHandler returns an http.Handler that renders the unified login page.
@@ -164,8 +165,8 @@ func DeviceLinkPageHandler(cfg *config.Config) http.Handler {
 		}
 
 		deviceCode := r.URL.Query().Get("code")
-		if !validDeviceCode(deviceCode) {
-			http.Error(w, "Missing or invalid device code", http.StatusBadRequest)
+		if !validFingerprint(deviceCode) {
+			http.Error(w, "Missing or invalid code", http.StatusBadRequest)
 			return
 		}
 
@@ -181,6 +182,7 @@ func DeviceLinkPageHandler(cfg *config.Config) http.Handler {
 			PAMAction:   DeviceLinkAPIPath,
 			Error:       r.URL.Query().Get("error"),
 			DeviceCode:  deviceCode,
+			ConfirmCode: FingerprintPrefix(deviceCode),
 		}
 		if err := loginTmpl.Execute(w, data); err != nil {
 			slog.Error("Failed to render device link page", "error", err)
