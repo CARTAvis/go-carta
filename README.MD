@@ -100,8 +100,33 @@ auth_mode = "oidc"
 issuer_url = "http://localhost:8080/realms/carta"
 client_id = "carta-ctl"
 client_secret = "YOUR_OIDC_SECRET"
-redirect_url = "http://localhost:8081/oidc/callback"
+redirect_url = "http://localhost:8081/api/auth/oidc_callback"
 ```
+
+#### Command line login
+
+The controller can issue credentials to a remote command line client through a device-style login. The client generates an Ed25519 keypair and registers the public key, the user confirms the login code in a browser, and the client polls for its session until the login is linked. This requires a database connection (`controller.db_conn_string`)..
+
+The provided client script runs the whole flow and saves the issued access token to a state file:
+
+```bash
+pip install cryptography requests
+python3 scripts/device_login_init.py --server http://localhost:8081
+```
+
+The access token is short-lived. While the key registration is still valid, it can be refreshed with a request signed by the device key:
+
+```bash
+python3 scripts/device_login_init.py --refresh
+```
+
+The saved session can be revoked with the same script. This signs a logout request with the device key, marks the session revoked on the controller, and deletes the local key and state files:
+
+```bash
+python3 scripts/device_login_init.py --revoke
+```
+
+The device login lifetime, minimum polling interval, maximum key-registration lifetime (`max_refresh_interval`), and public verification URL are configured under `[controller.device_auth]`. When OIDC device sessions are supported, the effective registration lifetime will be the earlier of `max_refresh_interval` and the OIDC offline-token expiry.
 
 #### Frontend directory
 

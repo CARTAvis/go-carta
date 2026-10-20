@@ -128,6 +128,12 @@ lifetime = "10m"
 # Minimum time a client must wait between polls for the login result.
 min_interval = "5s"
 
+# Maximum lifetime of a device key registration. The CLI can refresh its
+# access tokens for this long; after it expires the user must log in again.
+# When OIDC device sessions are supported, the effective lifetime will be the
+# earlier of this interval and the OIDC offline-token expiry.
+max_refresh_interval = "24h"
+
 # Public base URL of this server, used to build the verification link shown to
 # the user (e.g. "https://carta.example.org"). Must be an absolute http(s) URL.
 # If empty, the URL is derived from the incoming request's Host header, which

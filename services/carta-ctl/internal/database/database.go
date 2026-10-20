@@ -121,13 +121,20 @@ func (h *DbConfig) EnsureTables() error {
 
 		-- Set once the user has authenticated and linked the key to their account
 		username          TEXT,
-		linked_at         TIMESTAMPTZ
+		linked_at         TIMESTAMPTZ,
+
+		-- Authentication source used for the link ("pam", later "oidc")
+		source            TEXT
 	);
 
 	CREATE TABLE IF NOT EXISTS auth_sessions (
 		key_fingerprint         TEXT        PRIMARY KEY,
 		client_public_key       TEXT        NOT NULL,
 		username                TEXT        NOT NULL,
+
+		-- Authentication source that created the session ("pam", later "oidc")
+		source                  TEXT        NOT NULL DEFAULT 'pam',
+
 		oidc_refresh_token      BYTEA,                 -- AES-GCM encrypted; NULL for non-OIDC sessions
 		oidc_access_expiry      TIMESTAMPTZ,
 		created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),

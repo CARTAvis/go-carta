@@ -152,9 +152,18 @@ func main() {
 				slog.Error("Failed to configure device authorization", "error", err)
 				os.Exit(1)
 			}
+			devicePoll, err := auth.DevicePollHandler(&db, &db, cfg.Controller.DeviceAuth)
+			if err != nil {
+				slog.Error("Failed to configure device authorization polling", "error", err)
+				os.Exit(1)
+			}
+			deviceRefresh := auth.DeviceRefreshHandler(&db)
+			deviceLogout := auth.DeviceLogoutHandler(&db)
 			http.Handle(auth.DeviceVerifyPath, auth.DeviceLinkPageHandler(cfg))
 			http.Handle("/api/auth/device_init", ctlhttp.NoCache(deviceInit))
-			http.Handle("/api/auth/device_poll", ctlhttp.NoCache(auth.DevicePollHandler()))
+			http.Handle("/api/auth/device_poll", ctlhttp.NoCache(devicePoll))
+			http.Handle("/api/auth/device_refresh", ctlhttp.NoCache(deviceRefresh))
+			http.Handle("/api/auth/device_logout", ctlhttp.NoCache(deviceLogout))
 			http.Handle("/api/auth/device_link", ctlhttp.NoCache(auth.DeviceLinkHandler(&db, pamAuth)))
 		}
 		http.Handle(

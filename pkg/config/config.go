@@ -44,9 +44,10 @@ type TokenConfig struct {
 }
 
 type DeviceAuthConfig struct {
-	Lifetime    string `mapstructure:"lifetime"`
-	MinInterval string `mapstructure:"min_interval"`
-	PublicURL   string `mapstructure:"public_url"`
+	Lifetime           string `mapstructure:"lifetime"`
+	MinInterval        string `mapstructure:"min_interval"`
+	MaxRefreshInterval string `mapstructure:"max_refresh_interval"`
+	PublicURL          string `mapstructure:"public_url"`
 }
 
 type LoginPageConfig struct {
@@ -119,6 +120,7 @@ func setControllerDefaults(v *viper.Viper) {
 
 	v.SetDefault("controller.device_auth.lifetime", "10m")
 	v.SetDefault("controller.device_auth.min_interval", "5s")
+	v.SetDefault("controller.device_auth.max_refresh_interval", "24h")
 	v.SetDefault("controller.device_auth.public_url", "")
 
 }
