@@ -35,15 +35,18 @@ func (h *DbConfig) CreatePendingAuth(keyFingerprint, clientPublicKey string, exp
 // auth.ErrPendingAuthNotFound when there is no matching record.
 func (h *DbConfig) GetPendingAuth(keyFingerprint string) (*auth.PendingAuthRecord, error) {
 	var row struct {
-		ClientPublicKey string         `db:"client_public_key"`
-		ExpiresAt       time.Time      `db:"expires_at"`
-		LastPollTS      sql.NullInt64  `db:"last_poll_ts"`
-		Username        sql.NullString `db:"username"`
-		Source          sql.NullString `db:"source"`
+		ClientPublicKey  string         `db:"client_public_key"`
+		ExpiresAt        time.Time      `db:"expires_at"`
+		LastPollTS       sql.NullInt64  `db:"last_poll_ts"`
+		Username         sql.NullString `db:"username"`
+		Source           sql.NullString `db:"source"`
+		OIDCRefreshToken []byte         `db:"oidc_refresh_token"`
+		OIDCAccessExpiry sql.NullTime   `db:"oidc_access_expiry"`
 	}
 	err := h.db.Get(
 		&row,
-		`SELECT client_public_key, expires_at, last_poll_ts, username, source
+		`SELECT client_public_key, expires_at, last_poll_ts, username, source,
+		        oidc_refresh_token, oidc_access_expiry
 		 FROM auth_pending
 		 WHERE key_fingerprint = $1`,
 		keyFingerprint,
@@ -61,14 +64,19 @@ func (h *DbConfig) GetPendingAuth(keyFingerprint string) (*auth.PendingAuthRecor
 	}
 
 	record := &auth.PendingAuthRecord{
-		ClientPublicKey: row.ClientPublicKey,
-		ExpiresAt:       row.ExpiresAt,
-		Username:        row.Username.String,
-		Source:          source,
+		ClientPublicKey:  row.ClientPublicKey,
+		ExpiresAt:        row.ExpiresAt,
+		Username:         row.Username.String,
+		Source:           source,
+		OIDCRefreshToken: row.OIDCRefreshToken,
 	}
 	if row.LastPollTS.Valid {
 		timestamp := row.LastPollTS.Int64
 		record.LastPollTS = &timestamp
+	}
+	if row.OIDCAccessExpiry.Valid {
+		expiry := row.OIDCAccessExpiry.Time
+		record.OIDCAccessExpiry = &expiry
 	}
 	return record, nil
 }
@@ -133,4 +141,27 @@ func (h *DbConfig) LinkPendingAuth(keyFingerprint, username string, source auth.
 		return false, err
 	}
 	return n == 1, nil
+}
+
+// StorePendingAuthOIDCToken records the encrypted offline token and the
+// upstream access-token expiry for an unexpired pending OIDC device login. It
+// reports whether the pending login was found and updated.
+func (h *DbConfig) StorePendingAuthOIDCToken(keyFingerprint string, encryptedOfflineToken []byte, accessExpiry time.Time) error {
+	res, err := h.db.Exec(
+		`UPDATE auth_pending
+		 SET oidc_refresh_token = $2, oidc_access_expiry = $3
+		 WHERE key_fingerprint = $1 AND expires_at > NOW()`,
+		keyFingerprint, encryptedOfflineToken, accessExpiry,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return auth.ErrPendingAuthNotFound
+	}
+	return nil
 }

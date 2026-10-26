@@ -123,8 +123,13 @@ func (h *DbConfig) EnsureTables() error {
 		username          TEXT,
 		linked_at         TIMESTAMPTZ,
 
-		-- Authentication source used for the link ("pam", later "oidc")
-		source            TEXT
+		-- Authentication source used for the link ("pam", "oidc")
+		source            TEXT,
+
+		-- OIDC offline token (AES-GCM encrypted) and the expiry of the upstream
+		-- access token issued with it; NULL for non-OIDC logins
+		oidc_refresh_token BYTEA,
+		oidc_access_expiry TIMESTAMPTZ
 	);
 
 	CREATE TABLE IF NOT EXISTS auth_sessions (

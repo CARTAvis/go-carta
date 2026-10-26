@@ -2,12 +2,12 @@
 """Log in to a CARTA controller from the command line with a device login.
 
 The script generates an Ed25519 keypair, registers the public key with the
-controller, asks the user to confirm the login in a browser, then polls
-/api/auth/device_poll (signing each request with the private key) until the
-login is linked. On success a short-lived access token is saved to the state
-file. Use --refresh to obtain a new access token while the key registration is
-valid, and --revoke to revoke the session on the controller and delete the
-local key and state files.
+controller, prints the verification URL for the user to sign in and confirm
+the device link, then polls /api/auth/device_poll (signing each request with
+the private key) until the login is linked. On success a short-lived access
+token is saved to the state file. Use --refresh to obtain a new access token
+while the key registration is valid, and --revoke to revoke the session on
+the controller and delete the local key and state files.
 
 Requires: pip install cryptography requests
 """
@@ -18,7 +18,6 @@ import json
 import os
 import sys
 import time
-import webbrowser
 
 import requests
 from cryptography.hazmat.primitives import serialization
@@ -314,7 +313,6 @@ def main() -> int:
     parser.add_argument("--server", default=None, help=f"Base URL of carta-ctl (default: {DEFAULT_SERVER})")
     parser.add_argument("--key-file", default="carta_device_key.pem", help="Where to write the private key")
     parser.add_argument("--state-file", default="carta_device_login.json", help="Where to write the login state")
-    parser.add_argument("--no-browser", action="store_true", help="Do not try to open the verification page")
     parser.add_argument("--timeout", type=float, default=600.0, help="Maximum seconds to wait for confirmation")
     parser.add_argument("--revoke", action="store_true", help="Revoke the saved device session and remove local credentials")
     parser.add_argument("--refresh", action="store_true", help="Refresh the saved access token using the device key")
@@ -377,13 +375,9 @@ def main() -> int:
 
     print(f"Confirmation code: {fingerprint[:8]}")
     print("Check that this matches the code shown on the sign-in page.")
-    print(f"Open this URL in a browser to sign in:\n  {verification_uri}")
-    if not args.no_browser:
-        try:
-            if webbrowser.open(verification_uri):
-                print("Opened the verification page in your browser.")
-        except webbrowser.Error:
-            pass
+    print("Open this URL in a browser, sign in, and confirm the code:")
+    print(f"  {verification_uri}")
+    print("Waiting for the login to be confirmed...")
 
     deadline = time.monotonic() + min(args.timeout, expires_in)
 

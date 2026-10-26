@@ -202,18 +202,12 @@
         <p class="welcome">{{ .WelcomeText }}</p>
         {{ end }}
 
-        {{ if .DeviceCode }}
-        <p class="welcome">Sign in to link your device to your account.</p>
-        <p class="welcome">Code shown in your terminal: <strong>{{ .ConfirmCode }}</strong></p>
-        {{ end }}
-
         {{ if .Error }}
         <p class="error">{{ .Error }}</p>
         {{ end }}
 
         {{ if .ShowPAM }}
         <form method="POST" action="{{ .PAMAction }}">
-          {{ if .DeviceCode }}<input type="hidden" name="code" value="{{ .DeviceCode }}" />{{ end }}
           <div class="field">
             <label for="username">Username</label>
             <input id="username" name="username" placeholder="Username" autocomplete="username" required />
@@ -222,11 +216,6 @@
             <label for="password">Password</label>
             <input id="password" name="password" type="password" placeholder="Password" autocomplete="current-password" required />
           </div>
-          {{ if .DeviceCode }}
-          <div class="field">
-            <label><input type="checkbox" name="confirm" value="yes" required /> The code above matches the one in my terminal</label>
-          </div>
-          {{ end }}
           <button class="btn" type="submit">Sign In</button>
         </form>
         {{ end }}

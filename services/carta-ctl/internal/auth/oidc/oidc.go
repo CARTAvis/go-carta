@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -24,6 +25,14 @@ type OIDCAuthenticator struct {
 	provider *gooidc.Provider
 	verifier *gooidc.IDTokenVerifier
 	oauth2   *oauth2.Config
+
+	// cipher encrypts/decrypts OIDC offline tokens for device sessions. It is
+	// nil when no encryption key file has been configured.
+	cipher *tokenCipher
+
+	// pending stores the encrypted offline token alongside a pending device
+	// login. It is wired via SetPendingAuthStore once the database is ready.
+	pending auth.PendingAuthStore
 }
 
 func New(cfg config.OIDCConfig) (*OIDCAuthenticator, error) {
@@ -66,11 +75,67 @@ func New(cfg config.OIDCConfig) (*OIDCAuthenticator, error) {
 		},
 	}
 
+	// Load the offline-token encryption key when configured so OIDC device
+	// sessions can store their offline tokens encrypted.
+	var cipher *tokenCipher
+	if cfg.EncryptionKeyFile != "" {
+		key, err := loadEncryptionKey(cfg.EncryptionKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		cipher, err = newTokenCipher(key)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &OIDCAuthenticator{
 		provider: provider,
 		verifier: verifier,
 		oauth2:   oauth2cfg,
+		cipher:   cipher,
 	}, nil
+}
+
+// SetPendingAuthStore wires the device-login store into the authenticator so
+// device logins can persist their encrypted offline token. It must be called
+// once the database is initialised, before the OIDC endpoints receive traffic.
+func (o *OIDCAuthenticator) SetPendingAuthStore(store auth.PendingAuthStore) {
+	o.pending = store
+}
+
+// RefreshAccessToken implements auth.OIDCTokenRefresher. It decrypts the
+// stored offline token, exchanges it at the upstream token endpoint for a new
+// access token, and returns the newly encrypted offline token (when the
+// provider rotated it) together with the new access token's expiry.
+func (o *OIDCAuthenticator) RefreshAccessToken(ctx context.Context, encryptedOfflineToken []byte) ([]byte, time.Time, error) {
+	if o.cipher == nil {
+		return nil, time.Time{}, fmt.Errorf("OIDC encryption key is not configured")
+	}
+
+	offlineToken, err := o.cipher.Decrypt(encryptedOfflineToken)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+
+	src := o.oauth2.TokenSource(ctx, &oauth2.Token{RefreshToken: string(offlineToken)})
+	token, err := src.Token()
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("failed to refresh OIDC access token: %w", err)
+	}
+
+	// The oauth2 library preserves the refresh token we supplied when the
+	// provider does not return a new one, so a differing value indicates
+	// token rotation is enabled and the offline token must be re-encrypted.
+	newEncrypted := encryptedOfflineToken
+	if token.RefreshToken != "" && token.RefreshToken != string(offlineToken) {
+		newEncrypted, err = o.cipher.Encrypt([]byte(token.RefreshToken))
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+	}
+
+	return newEncrypted, token.Expiry, nil
 }
 
 // AuthenticateHTTP implements auth.Authenticator.
@@ -128,7 +193,9 @@ func codeChallengeS256(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(hash[:])
 }
 
-func setPKCECookies(w http.ResponseWriter, state, verifier, redirectParams string) {
+const deviceCodeCookieName = "oidc_device_code"
+
+func setPKCECookies(w http.ResponseWriter, state, verifier, redirectParams, deviceCode string) {
 	expires := time.Now().Add(5 * time.Minute)
 
 	http.SetCookie(w, &http.Cookie{
@@ -162,6 +229,23 @@ func setPKCECookies(w http.ResponseWriter, state, verifier, redirectParams strin
 			Expires:  expires,
 		})
 	}
+
+	deviceCodeCookie := &http.Cookie{
+		Name:     deviceCodeCookieName,
+		Value:    deviceCode,
+		Path:     "/api/auth",
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  expires,
+	}
+	if deviceCode == "" {
+		// Clear any device code left over from an abandoned device-link flow so
+		// it cannot be attached to an unrelated browser login.
+		deviceCodeCookie.Value = ""
+		deviceCodeCookie.MaxAge = -1
+	}
+	http.SetCookie(w, deviceCodeCookie)
 }
 
 func clearPKCECookies(w http.ResponseWriter) {
@@ -192,6 +276,15 @@ func clearPKCECookies(w http.ResponseWriter) {
 		Secure:   false,
 		SameSite: http.SameSiteLaxMode,
 	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     deviceCodeCookieName,
+		Value:    "",
+		Path:     "/api/auth",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 // LoginHandler redirects the user to Keycloak's authorization endpoint.
@@ -210,19 +303,36 @@ func (o *OIDCAuthenticator) LoginHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	challenge := codeChallengeS256(verifier)
-	setPKCECookies(w, state, verifier, r.URL.Query().Get("redirectParams"))
+	deviceCode := r.URL.Query().Get("device_code")
+	if deviceCode != "" && !auth.ValidFingerprint(deviceCode) {
+		http.Error(w, "Invalid device code", http.StatusBadRequest)
+		return
+	}
 
-	url := o.oauth2.AuthCodeURL(state, oauth2.AccessTypeOffline,
+	challenge := codeChallengeS256(verifier)
+	setPKCECookies(w, state, verifier, r.URL.Query().Get("redirectParams"), deviceCode)
+
+	authOptions := []oauth2.AuthCodeOption{
+		oauth2.AccessTypeOffline,
 		oauth2.SetAuthURLParam("code_challenge", challenge),
 		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
-	)
+	}
+	if deviceCode != "" {
+		// A device link must not reuse an existing browser session. prompt=login
+		// requires the identity provider to authenticate the user again even if
+		// it still has a session cookie.
+		authOptions = append(authOptions, oauth2.SetAuthURLParam("prompt", "login"))
+	}
+
+	url := o.oauth2.AuthCodeURL(state, authOptions...)
 	http.Redirect(w, r, url, http.StatusFound)
 }
 
 // CallbackHandler handles the redirect from Keycloak, exchanges the code
 // for tokens, validates the ID token, sets the session cookie, and redirects
-// back to the main UI (/).
+// back to the main UI (/). When the flow was started from a device login, it
+// instead issues a short-lived device-link ticket and redirects to the device
+// confirmation page.
 func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -250,6 +360,16 @@ func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Reque
 	if err != nil || verifierCookie.Value == "" {
 		slog.Error("OIDC: missing PKCE code verifier", "error", err)
 		http.Error(w, "Missing PKCE code verifier", http.StatusBadRequest)
+		return
+	}
+
+	deviceCode := ""
+	if deviceCodeCookie, err := r.Cookie(deviceCodeCookieName); err == nil {
+		deviceCode = deviceCodeCookie.Value
+	}
+	if deviceCode != "" && !auth.ValidFingerprint(deviceCode) {
+		clearPKCECookies(w)
+		http.Error(w, "Invalid device code", http.StatusBadRequest)
 		return
 	}
 
@@ -285,6 +405,47 @@ func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		slog.Error("OIDC: id_token verification failed", "error", err)
 		http.Error(w, "Invalid id_token", http.StatusUnauthorized)
+		return
+	}
+
+	// A device code in the callback means the browser was opened from a device
+	// login. Let the user confirm the link on the dedicated device page instead
+	// of starting a browser session. The offline token is stored (encrypted)
+	// against the pending login so the device session can refresh its upstream
+	// access token later.
+	if deviceCode != "" {
+		if o.pending == nil || o.cipher == nil {
+			slog.Error("OIDC: device login attempted without a device store or encryption key", "key_fingerprint", deviceCode)
+			http.Error(w, "Device login is not configured", http.StatusInternalServerError)
+			return
+		}
+
+		if oauth2Token.RefreshToken == "" {
+			slog.Warn("OIDC: device login received no offline (refresh) token; the session cannot be refreshed", "key_fingerprint", deviceCode)
+		} else {
+			encrypted, err := o.cipher.Encrypt([]byte(oauth2Token.RefreshToken))
+			if err != nil {
+				slog.Error("OIDC: failed to encrypt offline token", "username", user.Username, "error", err)
+				http.Error(w, "Session error", http.StatusInternalServerError)
+				return
+			}
+			if err := o.pending.StorePendingAuthOIDCToken(deviceCode, encrypted, oauth2Token.Expiry); err != nil {
+				slog.Error("OIDC: failed to store offline token", "username", user.Username, "error", err)
+				http.Error(w, "Session error", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		if err := auth.SetDeviceLinkCookie(w, user.Username, user.Source, deviceCode); err != nil {
+			slog.Error("OIDC: failed to create device link ticket", "username", user.Username, "error", err)
+			http.Error(w, "Session error", http.StatusInternalServerError)
+			return
+		}
+
+		slog.Info("OIDC: device login authenticated; awaiting confirmation", "username", user.Username, "key_fingerprint", deviceCode)
+		query := url.Values{}
+		query.Set("code", deviceCode)
+		http.Redirect(w, r, auth.DeviceVerifyPath+"?"+query.Encode(), http.StatusSeeOther)
 		return
 	}
 

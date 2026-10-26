@@ -91,6 +91,14 @@ client_secret = ""
 # Example: "http://localhost:8081/api/auth/oidc_callback"
 redirect_url = ""
 
+# Path to a file containing the key used to encrypt OIDC offline tokens before
+# they are stored in the database for device sessions. The file must contain
+# the raw key bytes (32 bytes for AES-256-GCM), e.g. generated with:
+#   head -c 32 /dev/urandom > /etc/carta/oidc_encryption.key
+# This is required to support OIDC device sessions. Leave empty to disable
+# OIDC device sessions.
+encryption_key_file = ""
+
 # Public application URL used for OIDC logout redirects after sign-out.
 # Example: "http://localhost:8081/login"
 app_url = ""
@@ -130,8 +138,8 @@ min_interval = "5s"
 
 # Maximum lifetime of a device key registration. The CLI can refresh its
 # access tokens for this long; after it expires the user must log in again.
-# When OIDC device sessions are supported, the effective lifetime will be the
-# earlier of this interval and the OIDC offline-token expiry.
+# For OIDC device sessions, each issued access token is additionally capped at
+# the expiry of the most recently retrieved upstream OIDC access token.
 max_refresh_interval = "24h"
 
 # Public base URL of this server, used to build the verification link shown to
@@ -139,6 +147,16 @@ max_refresh_interval = "24h"
 # If empty, the URL is derived from the incoming request's Host header, which
 # is less safe behind proxies and should be avoided in production.
 public_url = ""
+
+# How often expired pending device logins are purged from the database. If
+# empty, this defaults to half of `lifetime` (every 5m for the default 10m
+# lifetime). This is a background maintenance interval, not the polling rate.
+pending_purge_interval = ""
+
+# How often expired or revoked device sessions are purged from the database. If
+# empty, this defaults to `max_refresh_interval` / 24 (hourly for the default
+# 24h registration lifetime). This is a background maintenance interval.
+session_purge_interval = ""
 
 # ============================================================================
 # Spawner Configuration

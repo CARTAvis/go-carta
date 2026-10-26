@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ .Title }} – Link device</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+
+      html, body {
+        height: 100%;
+        margin: 0;
+        font-family: "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        background: #e8f0fe;
+        color: #333;
+      }
+
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .card {
+        background: #fff;
+        width: min(520px, calc(100% - 32px));
+        border-radius: 8px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+        padding: 28px 36px 24px;
+        text-align: center;
+      }
+
+      .branding {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        margin-bottom: 18px;
+      }
+
+      .branding img {
+        height: 56px;
+        width: auto;
+      }
+
+      .branding h1 {
+        margin: 0;
+        font-size: 1.6rem;
+        color: #1a3a5c;
+        font-weight: 600;
+      }
+
+      h2 {
+        margin: 0 0 12px;
+        font-size: 1.15rem;
+        color: #1a3a5c;
+      }
+
+      p {
+        margin: 10px 0;
+        font-size: 0.92rem;
+        line-height: 1.45;
+        color: #555;
+      }
+
+      .code {
+        margin: 18px 0;
+        padding: 12px;
+        border: 1px dashed #9bb8d3;
+        border-radius: 6px;
+        background: #f4f8fc;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 1.5rem;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        color: #1a3a5c;
+      }
+
+      .error {
+        color: #b00020;
+        font-size: 0.88rem;
+      }
+
+      .btn {
+        display: block;
+        width: 100%;
+        margin-top: 18px;
+        padding: 12px;
+        border: none;
+        border-radius: 4px;
+        font-size: 0.95rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        cursor: pointer;
+        text-transform: uppercase;
+        color: #fff;
+        background: #2b5f8a;
+      }
+
+      .btn:hover {
+        background: #1e476b;
+      }
+
+      .hint {
+        margin-top: 18px;
+        padding-top: 14px;
+        border-top: 1px solid #eee;
+        font-size: 0.8rem;
+        color: #777;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="card">
+      <div class="branding">
+        <img src="/login/logo" alt="CARTA logo" />
+        <h1>{{ .Title }}</h1>
+      </div>
+
+      <h2>Link this device?</h2>
+      <p>
+        A command-line client is requesting access to the account
+        <strong>{{ .Username }}</strong>.
+      </p>
+      <p>Confirm that this code matches the one shown in your terminal:</p>
+
+      <div class="code">{{ .ConfirmCode }}</div>
+
+      {{ if .Error }}
+      <p class="error">{{ .Error }}</p>
+      {{ end }}
+
+      <form method="POST" action="{{ .Action }}">
+        <input type="hidden" name="code" value="{{ .Code }}" />
+        <button class="btn" type="submit">Link Device</button>
+      </form>
+
+      <p class="hint">If you did not request this, close this page without linking the device.</p>
+    </div>
+  </body>
+</html>

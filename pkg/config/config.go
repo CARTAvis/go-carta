@@ -29,6 +29,12 @@ type OIDCConfig struct {
 	AppURL        string   `mapstructure:"app_url"`
 	AllowedAud    []string `mapstructure:"allowed_aud"`
 	AllowedGroups []string `mapstructure:"allowed_groups"`
+
+	// EncryptionKeyFile is the path to a file containing the key used to
+	// encrypt OIDC offline tokens before they are stored in the database for
+	// device sessions. The file must contain the raw key bytes (32 bytes for
+	// AES-256-GCM). When empty, OIDC device sessions cannot be created.
+	EncryptionKeyFile string `mapstructure:"encryption_key_file"`
 }
 
 type PAMConfig struct {
@@ -48,6 +54,64 @@ type DeviceAuthConfig struct {
 	MinInterval        string `mapstructure:"min_interval"`
 	MaxRefreshInterval string `mapstructure:"max_refresh_interval"`
 	PublicURL          string `mapstructure:"public_url"`
+
+	// PendingPurgeInterval is how often expired pending device logins are
+	// removed. When unset it defaults to half the pending login lifetime.
+	PendingPurgeInterval string `mapstructure:"pending_purge_interval"`
+
+	// SessionPurgeInterval is how often expired or revoked device sessions are
+	// removed. When unset it defaults to max_refresh_interval / 24 (hourly for
+	// the default 24h registration lifetime).
+	SessionPurgeInterval string `mapstructure:"session_purge_interval"`
+}
+
+// parseDeviceDuration parses a device_auth duration value that must be positive.
+func parseDeviceDuration(name, s string) (time.Duration, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid controller.device_auth.%s %q: must be a duration", name, s)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("invalid controller.device_auth.%s %q: must be a positive duration", name, s)
+	}
+	return d, nil
+}
+
+// PendingPurgeDuration resolves how often expired pending device logins are
+// purged. It returns the configured PendingPurgeInterval when set, otherwise
+// defaults to half the pending login lifetime (so each pending login is swept
+// roughly twice over its lifetime).
+func (d DeviceAuthConfig) PendingPurgeDuration() (time.Duration, error) {
+	if d.PendingPurgeInterval != "" {
+		return parseDeviceDuration("pending_purge_interval", d.PendingPurgeInterval)
+	}
+	lifetime, err := parseDeviceDuration("lifetime", d.Lifetime)
+	if err != nil {
+		return 0, err
+	}
+	if interval := lifetime / 2; interval >= time.Second {
+		return interval, nil
+	}
+	return time.Second, nil
+}
+
+// SessionPurgeDuration resolves how often expired or revoked device sessions
+// are purged. It returns the configured SessionPurgeInterval when set,
+// otherwise defaults to max_refresh_interval / 24 (hourly for the default 24h
+// lifetime), with a floor of one minute.
+func (d DeviceAuthConfig) SessionPurgeDuration() (time.Duration, error) {
+	if d.SessionPurgeInterval != "" {
+		return parseDeviceDuration("session_purge_interval", d.SessionPurgeInterval)
+	}
+	maxRefresh, err := parseDeviceDuration("max_refresh_interval", d.MaxRefreshInterval)
+	if err != nil {
+		return 0, err
+	}
+	interval := maxRefresh / 24
+	if interval < time.Minute {
+		interval = time.Minute
+	}
+	return interval, nil
 }
 
 type LoginPageConfig struct {
@@ -104,6 +168,7 @@ func setControllerDefaults(v *viper.Viper) {
 	v.SetDefault("controller.oidc.client_secret", "")
 	v.SetDefault("controller.oidc.redirect_url", "")
 	v.SetDefault("controller.oidc.app_url", "")
+	v.SetDefault("controller.oidc.encryption_key_file", "")
 	v.SetDefault("controller.db_conn_string", "")
 	v.SetDefault("controller.api_prefix", "/api")
 

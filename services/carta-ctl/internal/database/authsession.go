@@ -8,6 +8,14 @@ import (
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth"
 )
 
+// PurgeExpiredAuthSessions deletes device sessions that have expired or been
+// revoked. Revoked sessions can never be used again, so they are removed along
+// with expired ones to keep the table from growing without bound.
+func (h *DbConfig) PurgeExpiredAuthSessions() error {
+	_, err := h.db.Exec(`DELETE FROM auth_sessions WHERE expires_at < NOW() OR revoked`)
+	return err
+}
+
 // CreateAuthSession records a device session for a key fingerprint, replacing
 // any previous session for the same key (including a revoked one).
 func (h *DbConfig) CreateAuthSession(session auth.AuthSession) error {
@@ -93,6 +101,18 @@ func (h *DbConfig) GetAuthSession(keyFingerprint string) (*auth.AuthSessionRecor
 		record.OIDCAccessExpiry = &expiry
 	}
 	return record, nil
+}
+
+// UpdateAuthSessionOIDC updates the encrypted offline token and upstream
+// access-token expiry for an existing OIDC device session.
+func (h *DbConfig) UpdateAuthSessionOIDC(keyFingerprint string, encryptedOfflineToken []byte, accessExpiry time.Time) error {
+	_, err := h.db.Exec(
+		`UPDATE auth_sessions
+		 SET oidc_refresh_token = $2, oidc_access_expiry = $3
+		 WHERE key_fingerprint = $1`,
+		keyFingerprint, encryptedOfflineToken, accessExpiry,
+	)
+	return err
 }
 
 // UseAuthSession records the timestamp of an accepted signed request when it

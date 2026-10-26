@@ -19,10 +19,14 @@ import (
 )
 
 const (
-	// DeviceVerifyPath is the page where the user logs in and links the device code to their account.
+	// DeviceVerifyPath is the page where the user confirms linking a device
+	// code to their account after signing in.
 	DeviceVerifyPath = "/device_link"
-	// DeviceLinkAPIPath is where that page submits the credentials and device code.
-	DeviceLinkAPIPath = "/api/auth/device_link"
+
+	// deviceLinkCookieName holds a short-lived token proving that the browser
+	// user authenticated for a specific device login.
+	deviceLinkCookieName = "carta_device_link"
+	deviceLinkTicketAge  = 5 * time.Minute
 )
 
 // ErrKeyAlreadyRegistered is returned when a public key already has a pending login.
@@ -49,6 +53,13 @@ func FingerprintPrefix(fingerprint string) string {
 		return fingerprint
 	}
 	return fingerprint[:8]
+}
+
+// ValidFingerprint reports whether a value has the shape of a key fingerprint.
+// It is exported so other auth backends can validate a device code before
+// carrying it through their own login flow.
+func ValidFingerprint(code string) bool {
+	return validFingerprint(code)
 }
 
 // validFingerprint checks that a value has the shape of a key fingerprint.
@@ -108,12 +119,16 @@ type PendingAuthRecord struct {
 	// Source is the authentication source used when the login was linked. It is
 	// empty until linking, and older rows may leave it empty (treated as PAM).
 	Source Source
+	// OIDCRefreshToken and OIDCAccessExpiry are populated only for OIDC device
+	// logins. The offline (refresh) token is stored encrypted (AES-GCM);
+	// OIDCAccessExpiry is the expiry of the upstream access token issued with
+	// it. Both are nil for PAM logins.
+	OIDCRefreshToken []byte
+	OIDCAccessExpiry *time.Time
 }
 
 // PendingAuthStore persists in-flight device logins.
 type PendingAuthStore interface {
-	// PurgeExpiredPendingAuth removes pending records that have expired.
-	PurgeExpiredPendingAuth() error
 	// CreatePendingAuth stores a new pending device login, keyed by the fingerprint of the client's public key.
 	CreatePendingAuth(keyFingerprint, clientPublicKey string, expiresAt time.Time) error
 	// GetPendingAuth loads a pending device login by key fingerprint, returning
@@ -122,6 +137,9 @@ type PendingAuthStore interface {
 	// LinkPendingAuth links an unexpired, unlinked login to a user and records
 	// the authentication source, reporting whether it did so.
 	LinkPendingAuth(keyFingerprint, username string, source Source) (bool, error)
+	// StorePendingAuthOIDCToken records the encrypted offline token and the
+	// upstream access-token expiry for an OIDC device login.
+	StorePendingAuthOIDCToken(keyFingerprint string, encryptedOfflineToken []byte, accessExpiry time.Time) error
 	// RecordPendingAuthPoll stores the client timestamp of an accepted poll.
 	// It reports false when a newer poll timestamp was already recorded.
 	RecordPendingAuthPoll(keyFingerprint string, timestamp int64) (bool, error)
@@ -133,8 +151,8 @@ type PendingAuthStore interface {
 
 // AuthSession describes a device session to persist. ExpiresAt is the hard
 // deadline for the key registration: it is the configured maximum refresh
-// interval for PAM, and will be capped at the OIDC offline-token expiry when
-// OIDC device sessions are supported.
+// interval for PAM, and is unchanged for OIDC (each issued access token is
+// additionally capped at the upstream access-token expiry).
 type AuthSession struct {
 	KeyFingerprint  string
 	ClientPublicKey string
@@ -145,9 +163,10 @@ type AuthSession struct {
 	ExpiresAt time.Time
 	// LastRequestTS is the client timestamp of the preceding signed request.
 	LastRequestTS int64
-	// OIDCRefreshToken and OIDCAccessExpiry are reserved for OIDC device
-	// sessions and are nil for PAM sessions. The refresh token must already be
-	// encrypted (AES-GCM) by the OIDC integration. OIDCAccessExpiry caps ExpiresAt.
+	// OIDCRefreshToken and OIDCAccessExpiry are populated only for OIDC device
+	// sessions and are nil for PAM sessions. The offline (refresh) token is
+	// stored encrypted (AES-GCM). OIDCAccessExpiry is the expiry of the most
+	// recently retrieved upstream access token.
 	OIDCRefreshToken []byte
 	OIDCAccessExpiry *time.Time
 }
@@ -169,7 +188,9 @@ type AuthSessionRecord struct {
 	// Revoked reports whether the session has been logged out.
 	Revoked bool
 	// OIDCRefreshToken and OIDCAccessExpiry are populated only for OIDC
-	// device sessions. The token is stored encrypted.
+	// device sessions. The offline (refresh) token is stored encrypted;
+	// OIDCAccessExpiry is the expiry of the most recently retrieved upstream
+	// access token.
 	OIDCRefreshToken []byte
 	OIDCAccessExpiry *time.Time
 }
@@ -183,6 +204,9 @@ type AuthSessionStore interface {
 	// it has been revoked or has expired. It returns ErrAuthSessionNotFound
 	// when there is no matching record.
 	GetAuthSession(keyFingerprint string) (*AuthSessionRecord, error)
+	// UpdateAuthSessionOIDC updates the encrypted offline token and upstream
+	// access-token expiry for an existing OIDC device session.
+	UpdateAuthSessionOIDC(keyFingerprint string, encryptedOfflineToken []byte, accessExpiry time.Time) error
 	// UseAuthSession records the timestamp of an accepted signed request when
 	// it is newer than the previous one. It reports whether it did so.
 	UseAuthSession(keyFingerprint string, timestamp int64) (bool, error)
@@ -191,9 +215,15 @@ type AuthSessionStore interface {
 	RevokeAuthSession(keyFingerprint string, timestamp int64) (bool, error)
 }
 
-// CredentialAuthenticator verifies a username and password.
-type CredentialAuthenticator interface {
-	AuthenticateCredentials(ctx context.Context, username, password string) (*User, error)
+// OIDCTokenRefresher issues a new upstream OIDC access token from a stored
+// offline token. It is implemented by the OIDC integration and injected into
+// the device-session handlers when OIDC device sessions are enabled. The
+// encrypted offline token is opaque to this package.
+type OIDCTokenRefresher interface {
+	// RefreshAccessToken exchanges the encrypted offline token for a new
+	// upstream access token. It returns the (re-encrypted) offline token and
+	// the new access token's expiry.
+	RefreshAccessToken(ctx context.Context, encryptedOfflineToken []byte) (newEncryptedOfflineToken []byte, accessTokenExpiry time.Time, err error)
 }
 
 // requestOrigin derives the origin from the request. Used only when no public URL is configured.
@@ -225,16 +255,40 @@ func writeJSON(w http.ResponseWriter, status int, payload map[string]any) {
 	}
 }
 
-// deviceSessionExpiry returns the hard deadline for a device session. For PAM
-// the key registration lasts the configured maximum refresh interval. When
-// OIDC device sessions are supported, oidcAccessExpiry will carry the
-// provider's offline-token expiry and the earlier deadline wins.
-func deviceSessionExpiry(now time.Time, maxRefreshInterval time.Duration, oidcAccessExpiry *time.Time) time.Time {
-	expiresAt := now.Add(maxRefreshInterval)
-	if oidcAccessExpiry != nil && oidcAccessExpiry.Before(expiresAt) {
-		expiresAt = *oidcAccessExpiry
+// needsOIDCAccessRefresh reports whether the stored upstream OIDC access
+// token would expire within the local access-token lifetime and should be
+// refreshed before issuing a new access token. A nil or zero expiry means no
+// upstream access token has been stored yet, so a refresh is required.
+func needsOIDCAccessRefresh(now time.Time, accessExpiry *time.Time) bool {
+	if accessExpiry == nil || accessExpiry.IsZero() {
+		return true
 	}
-	return expiresAt
+	return !accessExpiry.After(now.Add(accessTokenAgeDur))
+}
+
+// deviceAccessExpiry returns the expiry for a locally issued device access
+// token, capped at the earlier of the session deadline and (for OIDC) the
+// upstream access-token expiry. A nil or zero upstream expiry applies no cap.
+func deviceAccessExpiry(now, sessionExpiresAt time.Time, upstreamAccessExpiry *time.Time) time.Time {
+	expiry := now.Add(accessTokenAgeDur)
+	if sessionExpiresAt.Before(expiry) {
+		expiry = sessionExpiresAt
+	}
+	if upstreamAccessExpiry != nil && !upstreamAccessExpiry.IsZero() && upstreamAccessExpiry.Before(expiry) {
+		expiry = *upstreamAccessExpiry
+	}
+	return expiry
+}
+
+// refreshOIDCAccessToken exchanges the stored offline token for a new
+// upstream access token and returns the (re-encrypted) offline token and the
+// new access-token expiry.
+func refreshOIDCAccessToken(ctx context.Context, refresher OIDCTokenRefresher, encryptedOfflineToken []byte) ([]byte, *time.Time, error) {
+	newEncrypted, newExpiry, err := refresher.RefreshAccessToken(ctx, encryptedOfflineToken)
+	if err != nil {
+		return nil, nil, err
+	}
+	return newEncrypted, &newExpiry, nil
 }
 
 // deviceSignedRequest is the JSON body shared by the poll, refresh and logout
@@ -330,11 +384,6 @@ func DeviceInitHandler(store PendingAuthStore, cfg config.DeviceAuthConfig) (htt
 
 		fingerprint := KeyFingerprint(keyBytes)
 
-		// Purge stale records so unauthenticated calls can't grow the table forever.
-		if err := store.PurgeExpiredPendingAuth(); err != nil {
-			slog.Warn("Failed to purge expired pending auth records", "err", err)
-		}
-
 		if err := store.CreatePendingAuth(fingerprint, req.PublicKey, time.Now().Add(lifetime)); err != nil {
 			if errors.Is(err, ErrKeyAlreadyRegistered) {
 				writeJSONError(w, http.StatusConflict, "This public key is already registered; generate a new keypair")
@@ -370,13 +419,17 @@ func DeviceInitHandler(store PendingAuthStore, cfg config.DeviceAuthConfig) (htt
 // be signed with the registered private key and carry a strictly increasing
 // timestamp, which enforces the polling interval and prevents replay.
 //
+// For OIDC device sessions, the offline token stored with the pending login is
+// used to obtain a fresh upstream access token when needed (see
+// OIDCTokenRefresher); refresher may be nil when only PAM sessions are used.
+//
 // Responses:
 //   - 202 Accepted: the login is still pending.
 //   - 200 OK: the login was linked; an access token and the session expiry are returned.
 //   - 429 Too Many Requests: the client polled again before the minimum interval.
 //   - 409 Conflict: the signed timestamp is not newer than the previous poll.
 //   - 410 Gone: the login is unknown, expired, or was already collected.
-func DevicePollHandler(store PendingAuthStore, sessions AuthSessionStore, cfg config.DeviceAuthConfig) (http.Handler, error) {
+func DevicePollHandler(store PendingAuthStore, sessions AuthSessionStore, cfg config.DeviceAuthConfig, refresher OIDCTokenRefresher) (http.Handler, error) {
 	minInterval, err := time.ParseDuration(cfg.MinInterval)
 	if err != nil || minInterval < time.Second {
 		return nil, fmt.Errorf("invalid controller.device_auth.min_interval %q: must be a duration of at least 1s", cfg.MinInterval)
@@ -424,9 +477,6 @@ func DevicePollHandler(store PendingAuthStore, sessions AuthSessionStore, cfg co
 		}
 
 		if !time.Now().Before(record.ExpiresAt) {
-			if err := store.PurgeExpiredPendingAuth(); err != nil {
-				slog.Warn("Failed to purge expired pending auth records", "err", err)
-			}
 			writeJSONError(w, http.StatusGone, "This login is invalid, expired, or already used")
 			return
 		}
@@ -488,11 +538,30 @@ func DevicePollHandler(store PendingAuthStore, sessions AuthSessionStore, cfg co
 		}
 
 		now := time.Now()
-		sessionExpiresAt := deviceSessionExpiry(now, maxRefreshInterval, nil)
-		accessExpiresAt := now.Add(accessTokenAgeDur)
-		if sessionExpiresAt.Before(accessExpiresAt) {
-			accessExpiresAt = sessionExpiresAt
+		sessionExpiresAt := now.Add(maxRefreshInterval)
+
+		// For OIDC device sessions, ensure the upstream access token is still
+		// usable for the lifetime of the token being issued, refreshing it with
+		// the stored offline token when necessary.
+		oidcRefreshToken := record.OIDCRefreshToken
+		oidcAccessExpiry := record.OIDCAccessExpiry
+		if source == SourceOIDC && oidcRefreshToken != nil {
+			if refresher == nil {
+				slog.Error("OIDC device session has no token refresher", "key_fingerprint", req.KeyFingerprint)
+				writeJSONError(w, http.StatusInternalServerError, "Internal server error")
+				return
+			}
+			if needsOIDCAccessRefresh(now, oidcAccessExpiry) {
+				oidcRefreshToken, oidcAccessExpiry, err = refreshOIDCAccessToken(r.Context(), refresher, oidcRefreshToken)
+				if err != nil {
+					slog.Error("Failed to refresh OIDC access token", "username", username, "err", err)
+					writeJSONError(w, http.StatusInternalServerError, "Internal server error")
+					return
+				}
+			}
 		}
+
+		accessExpiresAt := deviceAccessExpiry(now, sessionExpiresAt, oidcAccessExpiry)
 
 		accessToken, err := GenerateToken(username, source, TokenTypeAccess, accessExpiresAt)
 		if err != nil {
@@ -502,16 +571,17 @@ func DevicePollHandler(store PendingAuthStore, sessions AuthSessionStore, cfg co
 		}
 
 		// Record the session so access tokens can be refreshed and the session
-		// revoked. OIDC device sessions will pass the provider's refresh token
-		// and offline-token expiry here; the expiry is capped in
-		// deviceSessionExpiry.
+		// revoked. OIDC device sessions carry the (encrypted) offline token and
+		// the upstream access-token expiry.
 		if err := sessions.CreateAuthSession(AuthSession{
-			KeyFingerprint:  req.KeyFingerprint,
-			ClientPublicKey: record.ClientPublicKey,
-			Username:        username,
-			Source:          source,
-			ExpiresAt:       sessionExpiresAt,
-			LastRequestTS:   req.Timestamp,
+			KeyFingerprint:   req.KeyFingerprint,
+			ClientPublicKey:  record.ClientPublicKey,
+			Username:         username,
+			Source:           source,
+			ExpiresAt:        sessionExpiresAt,
+			LastRequestTS:    req.Timestamp,
+			OIDCRefreshToken: oidcRefreshToken,
+			OIDCAccessExpiry: oidcAccessExpiry,
 		}); err != nil {
 			slog.Error("Failed to record device session", "err", err)
 			writeJSONError(w, http.StatusInternalServerError, "Internal server error")
@@ -536,6 +606,12 @@ func DevicePollHandler(store PendingAuthStore, sessions AuthSessionStore, cfg co
 // token is needed. The key registration (session) has a hard expiry and cannot
 // be extended by refreshing.
 //
+// For OIDC device sessions, when the stored upstream access token would expire
+// within the local access-token lifetime it is refreshed using the stored
+// offline token (see OIDCTokenRefresher), and the returned access token's
+// lifetime is capped at the earlier of the local lifetime and the upstream
+// access token's expiry. refresher may be nil when only PAM sessions are used.
+//
 // Responses:
 //   - 200 OK: a new access token and the remaining session lifetime.
 //   - 400 Bad Request: the request is malformed.
@@ -543,7 +619,7 @@ func DevicePollHandler(store PendingAuthStore, sessions AuthSessionStore, cfg co
 //   - 403 Forbidden: the signature is invalid.
 //   - 409 Conflict: the signed timestamp is not newer than the previous one.
 //   - 410 Gone: no session exists for the key fingerprint.
-func DeviceRefreshHandler(sessions AuthSessionStore) http.Handler {
+func DeviceRefreshHandler(sessions AuthSessionStore, refresher OIDCTokenRefresher) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -605,10 +681,34 @@ func DeviceRefreshHandler(sessions AuthSessionStore) http.Handler {
 			source = SourcePAM
 		}
 
-		accessExpiresAt := time.Now().Add(accessTokenAgeDur)
-		if record.ExpiresAt.Before(accessExpiresAt) {
-			accessExpiresAt = record.ExpiresAt
+		now := time.Now()
+
+		// For OIDC device sessions, refresh the upstream access token with the
+		// stored offline token when it would expire within the local lifetime.
+		oidcAccessExpiry := record.OIDCAccessExpiry
+		if record.OIDCRefreshToken != nil {
+			if refresher == nil {
+				slog.Error("OIDC device session has no token refresher", "key_fingerprint", req.KeyFingerprint)
+				writeJSONError(w, http.StatusInternalServerError, "Internal server error")
+				return
+			}
+			if needsOIDCAccessRefresh(now, oidcAccessExpiry) {
+				newEncrypted, newExpiry, err := refreshOIDCAccessToken(r.Context(), refresher, record.OIDCRefreshToken)
+				if err != nil {
+					slog.Error("Failed to refresh OIDC access token", "username", record.Username, "err", err)
+					writeJSONError(w, http.StatusInternalServerError, "Internal server error")
+					return
+				}
+				if err := sessions.UpdateAuthSessionOIDC(req.KeyFingerprint, newEncrypted, *newExpiry); err != nil {
+					slog.Error("Failed to persist refreshed OIDC session", "err", err)
+					writeJSONError(w, http.StatusInternalServerError, "Internal server error")
+					return
+				}
+				oidcAccessExpiry = newExpiry
+			}
 		}
+
+		accessExpiresAt := deviceAccessExpiry(now, record.ExpiresAt, oidcAccessExpiry)
 
 		accessToken, err := GenerateToken(record.Username, source, TokenTypeAccess, accessExpiresAt)
 		if err != nil {
@@ -712,75 +812,75 @@ func DeviceLogoutHandler(sessions AuthSessionStore) http.Handler {
 	})
 }
 
-func redirectToDeviceLinkWithError(w http.ResponseWriter, r *http.Request, code, message string) {
-	v := url.Values{}
-	v.Set("code", code)
-	v.Set("error", message)
-	http.Redirect(w, r, DeviceVerifyPath+"?"+v.Encode(), http.StatusSeeOther)
+// SetDeviceLinkCookie records that the browser user authenticated for a
+// specific device login. The signed token is bound to the device code and is
+// accepted only by the device confirmation page.
+func SetDeviceLinkCookie(w http.ResponseWriter, username string, source Source, deviceCode string) error {
+	if username == "" {
+		return fmt.Errorf("username is required")
+	}
+	if !validFingerprint(deviceCode) {
+		return fmt.Errorf("invalid device code")
+	}
+
+	expiresAt := time.Now().Add(deviceLinkTicketAge)
+	token, err := GenerateDeviceLinkToken(username, source, deviceCode, expiresAt)
+	if err != nil {
+		return err
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     deviceLinkCookieName,
+		Value:    token,
+		Path:     DeviceVerifyPath,
+		Expires:  expiresAt,
+		MaxAge:   int(deviceLinkTicketAge.Seconds()),
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+	})
+	return nil
 }
 
-// DeviceLinkHandler handles the submission of the /device_link page: it
-// authenticates the user's credentials and links the device code to them.
-// The linked session is later collected by the polling client.
-func DeviceLinkHandler(store PendingAuthStore, authenticator CredentialAuthenticator) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", http.MethodPost)
-			writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
-			return
-		}
-		if authenticator == nil {
-			writeJSONError(w, http.StatusNotImplemented, "Credential login is not enabled")
-			return
-		}
-
-		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
-		if err := r.ParseForm(); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "Invalid request")
-			return
-		}
-
-		code := r.PostForm.Get("code")
-		if !validFingerprint(code) {
-			writeJSONError(w, http.StatusBadRequest, "Missing or invalid code")
-			return
-		}
-
-		if r.PostForm.Get("confirm") != "yes" {
-			redirectToDeviceLinkWithError(w, r, code, "Please confirm that the code matches the one shown in your terminal")
-			return
-		}
-
-		username := r.PostForm.Get("username")
-		password := r.PostForm.Get("password")
-		if username == "" || password == "" {
-			redirectToDeviceLinkWithError(w, r, code, "Please enter both username and password")
-			return
-		}
-
-		user, err := authenticator.AuthenticateCredentials(r.Context(), username, password)
-		if err != nil {
-			slog.Warn("Device link login failed", "username", username, "error", err)
-			redirectToDeviceLinkWithError(w, r, code, "Invalid username or password")
-			return
-		}
-
-		linked, err := store.LinkPendingAuth(code, user.Username, user.Source)
-		if err != nil {
-			slog.Error("Failed to link login", "username", user.Username, "error", err)
-			writeJSONError(w, http.StatusInternalServerError, "Internal server error")
-			return
-		}
-		if !linked {
-			redirectToDeviceLinkWithError(w, r, code, "This login code is invalid, expired, or already used")
-			return
-		}
-
-		slog.Info("Linked device login to user", "username", user.Username)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		if err := deviceLinkedTmpl.Execute(w, map[string]string{"Username": user.Username}); err != nil {
-			slog.Error("Failed to render device linked page", "error", err)
-		}
+// clearDeviceLinkCookie removes the pending device-link ticket.
+func clearDeviceLinkCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     deviceLinkCookieName,
+		Value:    "",
+		Path:     DeviceVerifyPath,
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
 	})
+}
+
+// deviceLinkUser returns the authenticated user from a device-link ticket when
+// the ticket was issued for the given device code.
+func deviceLinkUser(r *http.Request, deviceCode string) (*User, bool) {
+	cookie, err := r.Cookie(deviceLinkCookieName)
+	if err != nil {
+		return nil, false
+	}
+
+	claims, err := VerifyToken(cookie.Value)
+	if err != nil || claims.Type != TokenTypeDeviceLink || claims.DeviceCode != deviceCode || claims.Username == "" {
+		return nil, false
+	}
+
+	return &User{
+		Username: claims.Username,
+		Source:   NormalizeSource(claims.Source),
+		Claims:   map[string]any{},
+	}, true
+}
+
+// WriteDeviceLinkedPage renders the page shown after a device login has been
+// linked to a user account.
+func WriteDeviceLinkedPage(w http.ResponseWriter, username string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	if err := deviceLinkedTmpl.Execute(w, map[string]string{"Username": username}); err != nil {
+		slog.Error("Failed to render device linked page", "error", err)
+	}
 }

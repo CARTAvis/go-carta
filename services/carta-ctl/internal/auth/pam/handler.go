@@ -20,6 +20,9 @@ func redirectToLoginWithError(w http.ResponseWriter, r *http.Request, message st
 	if redirectParams := r.URL.Query().Get("redirectParams"); redirectParams != "" {
 		v.Set("redirectParams", redirectParams)
 	}
+	if deviceCode := r.URL.Query().Get("device_code"); deviceCode != "" {
+		v.Set("device_code", deviceCode)
+	}
 	v.Set("error", message)
 	http.Redirect(w, r, "/login?"+v.Encode(), http.StatusFound)
 }
@@ -51,6 +54,26 @@ func NewLoginHandler(p loginAuthenticator) http.Handler {
 				redirectToLoginWithError(w, r, "Invalid username or password")
 				return
 			}
+
+			if deviceCode := r.URL.Query().Get("device_code"); deviceCode != "" {
+				if !auth.ValidFingerprint(deviceCode) {
+					redirectToLoginWithError(w, r, "Invalid device login request")
+					return
+				}
+				// Authenticate the browser for the device confirmation step
+				// without starting a browser session.
+				if err := auth.SetDeviceLinkCookie(w, user.Username, user.Source, deviceCode); err != nil {
+					slog.Error("Failed to create device link ticket", "username", user.Username, "error", err)
+					http.Error(w, "Session error", http.StatusInternalServerError)
+					return
+				}
+
+				v := url.Values{}
+				v.Set("code", deviceCode)
+				http.Redirect(w, r, auth.DeviceVerifyPath+"?"+v.Encode(), http.StatusSeeOther)
+				return
+			}
+
 			slog.Info("About to set PAM session cookie", "username", user.Username)
 
 			if err := auth.SetRefreshTokenCookie(w, user.Username, auth.SourcePAM); err != nil {

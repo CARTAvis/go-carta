@@ -15,14 +15,16 @@ import (
 type TokenType string
 
 const (
-	TokenTypeAccess  TokenType = "access"
-	TokenTypeRefresh TokenType = "refresh"
+	TokenTypeAccess     TokenType = "access"
+	TokenTypeRefresh    TokenType = "refresh"
+	TokenTypeDeviceLink TokenType = "device_link"
 )
 
 type TokenClaims struct {
-	Username string    `json:"username"`
-	Source   Source    `json:"source,omitempty"`
-	Type     TokenType `json:"type"`
+	Username   string    `json:"username"`
+	Source     Source    `json:"source,omitempty"`
+	Type       TokenType `json:"type"`
+	DeviceCode string    `json:"device_code,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -97,6 +99,36 @@ func GenerateToken(username string, source Source, tokenType TokenType, expiresA
 		Username: username,
 		Source:   NormalizeSource(source),
 		Type:     tokenType,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    tokenConfig.Issuer,
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	return token.SignedString(privateKey)
+}
+
+// GenerateDeviceLinkToken creates a short-lived token proving that a browser
+// user authenticated for a specific device login. It is accepted only by the
+// device link confirmation page.
+func GenerateDeviceLinkToken(username string, source Source, deviceCode string, expiresAt time.Time) (string, error) {
+	if username == "" {
+		return "", fmt.Errorf("username is required")
+	}
+	if !validFingerprint(deviceCode) {
+		return "", fmt.Errorf("invalid device code")
+	}
+	if !expiresAt.After(time.Now()) {
+		return "", fmt.Errorf("token expiry must be in the future")
+	}
+
+	claims := TokenClaims{
+		Username:   username,
+		Source:     NormalizeSource(source),
+		Type:       TokenTypeDeviceLink,
+		DeviceCode: deviceCode,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    tokenConfig.Issuer,
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
