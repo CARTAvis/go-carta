@@ -101,7 +101,25 @@ issuer_url = "http://localhost:8080/realms/carta"
 client_id = "carta-ctl"
 client_secret = "YOUR_OIDC_SECRET"
 redirect_url = "http://localhost:8081/api/auth/oidc_callback"
+encryption_key_file = "/etc/carta/oidc_encryption.key"
 ```
+
+#### OIDC encryption key
+
+`controller.oidc.encryption_key_file` is required whenever OIDC authentication is enabled (`auth_mode = "oidc"` or `"both"`); the controller exits at startup if it is not set. The key encrypts the provider's offline tokens before they are stored in the database for device sessions. Generate it once with OpenSSL, creating the file with restrictive permissions from the start:
+
+```bash
+sudo sh -c 'umask 077 && openssl rand -out /etc/carta/oidc_encryption.key 32'
+```
+
+Then reference it from the configuration file:
+
+```toml
+[controller.oidc]
+encryption_key_file = "/etc/carta/oidc_encryption.key"
+```
+
+The file must contain exactly 32 raw random bytes, as produced by `openssl rand 32`; do not base64- or hex-encode it. Keep it readable only by the account that runs `carta-ctl` (the command above creates it as `0600`, owned by the user running `sudo`); if the controller runs as a different user, `chown` the file to that account. Do not commit it to version control or share it between deployments. Existing device sessions cannot refresh their upstream tokens if this key is lost or changed, so they will need to log in again.
 
 #### Command line login
 
@@ -126,7 +144,7 @@ The saved session can be revoked with the same script. This signs a logout reque
 python3 scripts/device_login_init.py --revoke
 ```
 
-Device authorization is disabled by default and enabled with `enabled = true` under `[controller.device_auth]`. When enabled, `public_url` is **required** (the controller fails to start without it) so verification links cannot be forged from a spoofed `Host` header; the device login lifetime, minimum polling interval, and maximum key-registration lifetime (`max_refresh_interval`) are also configured there. `max_pending_per_ip` caps the number of outstanding device logins a single client IP may register (set `0` to disable; the default is generous because a cluster may share one egress IP), and `client_ip_header` names a trusted-proxy header (e.g. `X-Forwarded-For`) to use as the client IP for that limit. For OIDC device sessions, the controller stores the provider's offline token encrypted (using the key in `controller.oidc.encryption_key_file`), refreshes the upstream access token when it would expire within the local access-token lifetime, and issues access tokens whose lifetime is capped at the earlier of the local lifetime and the upstream access token's expiry. The offline token is written directly to the pending login when the user's authentication completes; it is never placed in a browser cookie. Expired pending logins and expired/revoked sessions are purged by a background maintenance loop; its cadence can be tuned with `pending_purge_interval` (defaults to half of `lifetime`) and `session_purge_interval` (defaults to `max_refresh_interval` / 24).
+Device authorization is disabled by default and enabled with `enabled = true` under `[controller.device_auth]`. When enabled, `controller.public_url` is **required** (the controller fails to start without it) so verification links cannot be forged from a spoofed `Host` header; the device login lifetime, minimum polling interval, and maximum key-registration lifetime (`max_refresh_interval`) are also configured there. `controller.public_url` is the single source of truth for the controller's externally visible base URL and is also used as the default OIDC post-logout redirect (`<public_url>/login`, overridable with `controller.oidc.post_logout_redirect_uri`). `max_pending_per_ip` caps the number of outstanding device logins a single client IP may register (set `0` to disable; the default is generous because a cluster may share one egress IP), and `client_ip_header` names a trusted-proxy header (e.g. `X-Forwarded-For`) to use as the client IP for that limit. For OIDC device sessions, the controller stores the provider's offline token encrypted (using the key in `controller.oidc.encryption_key_file`), refreshes the upstream access token when it would expire within the local access-token lifetime, and issues access tokens whose lifetime is capped at the earlier of the local lifetime and the upstream access token's expiry. The offline token is written directly to the pending login when the user's authentication completes; it is never placed in a browser cookie. Expired pending logins and expired/revoked sessions are purged by a background maintenance loop; its cadence can be tuned with `pending_purge_interval` (defaults to half of `lifetime`) and `session_purge_interval` (defaults to `max_refresh_interval` / 24).
 
 #### Frontend directory
 

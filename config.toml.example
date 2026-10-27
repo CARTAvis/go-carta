@@ -31,6 +31,14 @@ port = 8081
 # Hostname to bind to. If this is empty, all interfaces will be used
 hostname = ""
 
+# Externally visible base URL of this controller (origin plus any path prefix
+# added by a reverse proxy). Used to build device verification links and as the
+# default OIDC post-logout redirect. Must be an absolute http(s) URL.
+# Required when device authorization is enabled. Examples:
+#   "https://carta.example.org"
+#   "https://example.org/carta"
+public_url = ""
+
 # Directory containing the CARTA frontend static files
 # If empty, the controller will not serve the frontend
 frontend_dir = ""
@@ -93,15 +101,18 @@ redirect_url = ""
 
 # Path to a file containing the key used to encrypt OIDC offline tokens before
 # they are stored in the database for device sessions. The file must contain
-# the raw key bytes (32 bytes for AES-256-GCM), e.g. generated with:
-#   head -c 32 /dev/urandom > /etc/carta/oidc_encryption.key
-# This is required to support OIDC device sessions. Leave empty to disable
-# OIDC device sessions.
+# exactly 32 raw random bytes (AES-256-GCM), not base64 or hex, e.g. generated
+# with:
+#   sudo sh -c 'umask 077 && openssl rand -out /etc/carta/oidc_encryption.key 32'
+# Keep the file readable only by the user that runs carta-ctl.
+# Required when auth_mode is "oidc" or "both"; the controller refuses to start
+# if this is not set.
 encryption_key_file = ""
 
-# Public application URL used for OIDC logout redirects after sign-out.
+# OIDC post-logout redirect URI. Defaults to `<public_url>/login` when empty.
+# Set explicitly if the identity provider requires a different registered URI.
 # Example: "http://localhost:8081/login"
-app_url = ""
+post_logout_redirect_uri = ""
 
 # ----------------------------------------------------------------------------
 # JWT Token Configuration
@@ -132,7 +143,7 @@ refresh_token_age = "24h"
 
 # Enable the device authorization flow (device_init, device_poll,
 # device_refresh, device_logout, and the /device_link approval page).
-# Disabled by default. When enabled, `public_url` below is required and the
+# Disabled by default. When enabled, `controller.public_url` is required and the
 # controller will refuse to start without it.
 enabled = false
 
@@ -147,12 +158,6 @@ min_interval = "5s"
 # For OIDC device sessions, each issued access token is additionally capped at
 # the expiry of the most recently retrieved upstream OIDC access token.
 max_refresh_interval = "24h"
-
-# Public base URL of this server, used to build the verification link shown to
-# the user (e.g. "https://carta.example.org"). Must be an absolute http(s) URL.
-# Required when `enabled` is true: the controller refuses to start otherwise so
-# verification links cannot be poisoned via a spoofed Host header.
-public_url = ""
 
 # How often expired pending device logins are purged from the database. If
 # empty, this defaults to half of `lifetime` (every 5m for the default 10m

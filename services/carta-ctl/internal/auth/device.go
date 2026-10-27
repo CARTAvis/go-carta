@@ -396,7 +396,7 @@ func verifyDeviceSignature(storedPublicKey, keyFingerprint string, signature, me
 // DeviceInitHandler starts a device-style login flow. The client registers an
 // Ed25519 public key; the base64url SHA-256 of that key (its fingerprint) identifies
 // the pending login and is embedded in the verification URL the user opens in a browser.
-func DeviceInitHandler(store PendingAuthStore, cfg config.DeviceAuthConfig) (http.Handler, error) {
+func DeviceInitHandler(store PendingAuthStore, cfg config.DeviceAuthConfig, publicURL string) (http.Handler, error) {
 	lifetime, err := time.ParseDuration(cfg.Lifetime)
 	if err != nil || lifetime <= 0 {
 		return nil, fmt.Errorf("invalid controller.device_auth.lifetime %q: must be a positive duration", cfg.Lifetime)
@@ -409,14 +409,14 @@ func DeviceInitHandler(store PendingAuthStore, cfg config.DeviceAuthConfig) (htt
 
 	// Device verification links must be built from a configured, trusted base
 	// URL. Deriving them from the request's Host header would let an attacker
-	// poison the link, so public_url is required when device auth is enabled.
-	publicURL := strings.TrimRight(strings.TrimSpace(cfg.PublicURL), "/")
-	if publicURL == "" {
-		return nil, fmt.Errorf("controller.device_auth.public_url must be set to enable device authorization")
+	// poison the link, so controller.public_url is required when device auth is
+	// enabled.
+	publicURL, err = config.NormalizePublicURL(publicURL)
+	if err != nil {
+		return nil, err
 	}
-	u, err := url.Parse(publicURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, fmt.Errorf("invalid controller.device_auth.public_url %q: must be an absolute http(s) URL", cfg.PublicURL)
+	if publicURL == "" {
+		return nil, fmt.Errorf("controller.public_url must be set to enable device authorization")
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

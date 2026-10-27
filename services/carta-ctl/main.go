@@ -89,10 +89,27 @@ func main() {
 	// Device authorization is opt-in, but once enabled it must be usable.
 	// Validate up front so a misconfiguration fails fast with a clear message
 	// instead of silently leaving the device auth endpoints unregistered.
+	publicURL, err := config.NormalizePublicURL(cfg.Controller.PublicURL)
+	if err != nil {
+		slog.Error("Invalid controller configuration", "error", err)
+		os.Exit(1)
+	}
+	cfg.Controller.PublicURL = publicURL
+
+	// OIDC device sessions store the provider's offline token encrypted, so the
+	// key is mandatory whenever OIDC authentication is enabled.
+	if cfg.Controller.AuthMode == config.AuthOIDC || cfg.Controller.AuthMode == config.AuthBoth {
+		if strings.TrimSpace(cfg.Controller.OIDC.EncryptionKeyFile) == "" {
+			slog.Error("OIDC authentication requires controller.oidc.encryption_key_file to be set",
+				"hint", "generate a 32-byte key (e.g. openssl rand -out /etc/carta/oidc_encryption.key 32) and set its path, or disable OIDC authentication")
+			os.Exit(1)
+		}
+	}
+
 	if cfg.Controller.DeviceAuth.Enabled {
-		if strings.TrimSpace(cfg.Controller.DeviceAuth.PublicURL) == "" {
-			slog.Error("Device authorization is enabled but controller.device_auth.public_url is not set",
-				"hint", "set controller.device_auth.public_url to this controller's public base URL, or set controller.device_auth.enabled = false")
+		if publicURL == "" {
+			slog.Error("Device authorization is enabled but controller.public_url is not set",
+				"hint", "set controller.public_url to this controller's public base URL, or set controller.device_auth.enabled = false")
 			os.Exit(1)
 		}
 		if cfg.Controller.AuthMode == config.AuthNone {
@@ -110,7 +127,7 @@ func main() {
 		// Without them, device login requests fall through to the authenticated
 		// /api/ handler and fail with a confusing 401.
 		slog.Warn("Device authorization is not enabled; device login endpoints are not registered",
-			"hint", "set controller.device_auth.enabled = true and configure public_url to enable device login")
+			"hint", "set controller.device_auth.enabled = true and configure controller.public_url to enable device login")
 	}
 
 	runtimeSpawnerAddress = cfg.Controller.SpawnerAddress
@@ -199,14 +216,11 @@ func main() {
 			// tokens afterwards. It is nil for PAM-only deployments.
 			var oidcRefresher auth.OIDCTokenRefresher
 			if oidcAuth != nil {
-				if cfg.Controller.OIDC.EncryptionKeyFile == "" {
-					slog.Warn("OIDC device sessions require controller.oidc.encryption_key_file; OIDC device login will fail until it is configured")
-				}
 				oidcAuth.SetPendingAuthStore(&db)
 				oidcRefresher = oidcAuth
 			}
 
-			deviceInit, err := auth.DeviceInitHandler(&db, cfg.Controller.DeviceAuth)
+			deviceInit, err := auth.DeviceInitHandler(&db, cfg.Controller.DeviceAuth, publicURL)
 			if err != nil {
 				slog.Error("Failed to configure device authorization", "error", err)
 				os.Exit(1)
