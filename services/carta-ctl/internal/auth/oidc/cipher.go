@@ -17,14 +17,29 @@ type tokenCipher struct {
 	aead cipher.AEAD
 }
 
-// loadEncryptionKey reads the raw key bytes from the configured file.
+// maxEncryptionKeySize is the largest key AES accepts (AES-256).
+const maxEncryptionKeySize = 32
+
+// loadEncryptionKey reads the raw key bytes from the configured file. The read
+// is capped at the largest valid AES key size so an oversized file cannot be
+// loaded into memory just to have newTokenCipher reject it.
 func loadEncryptionKey(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read OIDC encryption key file %q: %w", path, err)
+	}
+	defer f.Close()
+
+	// Read one extra byte so any file larger than a valid key is detected.
+	data, err := io.ReadAll(io.LimitReader(f, maxEncryptionKeySize+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read OIDC encryption key file %q: %w", path, err)
 	}
 	if len(data) == 0 {
 		return nil, fmt.Errorf("OIDC encryption key file %q is empty", path)
+	}
+	if len(data) > maxEncryptionKeySize {
+		return nil, fmt.Errorf("OIDC encryption key file %q is too large: must be at most %d bytes", path, maxEncryptionKeySize)
 	}
 	return data, nil
 }
