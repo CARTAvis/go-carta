@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -26,9 +27,19 @@ type OIDCConfig struct {
 	ClientID      string   `mapstructure:"client_id"`
 	ClientSecret  string   `mapstructure:"client_secret"`
 	RedirectURL   string   `mapstructure:"redirect_url"`
-	AppURL        string   `mapstructure:"app_url"`
 	AllowedAud    []string `mapstructure:"allowed_aud"`
 	AllowedGroups []string `mapstructure:"allowed_groups"`
+
+	// PostLogoutRedirectURI is passed to the identity provider as
+	// post_logout_redirect_uri. When empty it defaults to
+	// <controller.public_url>/login.
+	PostLogoutRedirectURI string `mapstructure:"post_logout_redirect_uri"`
+
+	// EncryptionKeyFile is the path to a file containing the key used to
+	// encrypt OIDC offline tokens before they are stored in the database for
+	// device sessions. The file must contain the raw key bytes (32 bytes for
+	// AES-256-GCM). When empty, OIDC device sessions cannot be created.
+	EncryptionKeyFile string `mapstructure:"encryption_key_file"`
 }
 
 type PAMConfig struct {
@@ -43,6 +54,89 @@ type TokenConfig struct {
 	RefreshTokenAge    string `mapstructure:"refresh_token_age"`
 }
 
+type DeviceAuthConfig struct {
+	// Enabled turns on the device authorization flow (device_init, poll,
+	// refresh, logout, and the /device_link approval page). When false the
+	// controller does not register those endpoints. controller.public_url is
+	// required when this is true.
+	Enabled bool `mapstructure:"enabled"`
+
+	Lifetime           string `mapstructure:"lifetime"`
+	MinInterval        string `mapstructure:"min_interval"`
+	MaxRefreshInterval string `mapstructure:"max_refresh_interval"`
+
+	// PendingPurgeInterval is how often expired pending device logins are
+	// removed. When unset it defaults to half the pending login lifetime.
+	PendingPurgeInterval string `mapstructure:"pending_purge_interval"`
+
+	// SessionPurgeInterval is how often expired or revoked device sessions are
+	// removed. When unset it defaults to max_refresh_interval / 24 (hourly for
+	// the default 24h registration lifetime).
+	SessionPurgeInterval string `mapstructure:"session_purge_interval"`
+
+	// MaxPendingPerIP caps the number of unexpired, unlinked device logins that
+	// may be pending from a single client IP address. A value <= 0 disables the
+	// limit. The default is deliberately generous: a controller may be deployed
+	// on a compute cluster where many distinct users share a single egress IP.
+	MaxPendingPerIP int `mapstructure:"max_pending_per_ip"`
+
+	// ClientIPHeader, when non-empty, names a request header (for example
+	// "X-Forwarded-For" or "X-Real-IP") whose value is used as the client IP for
+	// device-init rate limiting instead of the peer address in RemoteAddr. Only
+	// set this when the controller sits behind a trusted reverse proxy; the
+	// header is otherwise client-controlled and can bypass the per-IP limit.
+	ClientIPHeader string `mapstructure:"client_ip_header"`
+}
+
+// parseDeviceDuration parses a device_auth duration value that must be positive.
+func parseDeviceDuration(name, s string) (time.Duration, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid controller.device_auth.%s %q: must be a duration", name, s)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("invalid controller.device_auth.%s %q: must be a positive duration", name, s)
+	}
+	return d, nil
+}
+
+// PendingPurgeDuration resolves how often expired pending device logins are
+// purged. It returns the configured PendingPurgeInterval when set, otherwise
+// defaults to half the pending login lifetime (so each pending login is swept
+// roughly twice over its lifetime).
+func (d DeviceAuthConfig) PendingPurgeDuration() (time.Duration, error) {
+	if d.PendingPurgeInterval != "" {
+		return parseDeviceDuration("pending_purge_interval", d.PendingPurgeInterval)
+	}
+	lifetime, err := parseDeviceDuration("lifetime", d.Lifetime)
+	if err != nil {
+		return 0, err
+	}
+	if interval := lifetime / 2; interval >= time.Second {
+		return interval, nil
+	}
+	return time.Second, nil
+}
+
+// SessionPurgeDuration resolves how often expired or revoked device sessions
+// are purged. It returns the configured SessionPurgeInterval when set,
+// otherwise defaults to max_refresh_interval / 24 (hourly for the default 24h
+// lifetime), with a floor of one minute.
+func (d DeviceAuthConfig) SessionPurgeDuration() (time.Duration, error) {
+	if d.SessionPurgeInterval != "" {
+		return parseDeviceDuration("session_purge_interval", d.SessionPurgeInterval)
+	}
+	maxRefresh, err := parseDeviceDuration("max_refresh_interval", d.MaxRefreshInterval)
+	if err != nil {
+		return 0, err
+	}
+	interval := maxRefresh / 24
+	if interval < time.Minute {
+		interval = time.Minute
+	}
+	return interval, nil
+}
+
 type LoginPageConfig struct {
 	Title       string `mapstructure:"title"`
 	WelcomeText string `mapstructure:"welcome_text"`
@@ -51,17 +145,56 @@ type LoginPageConfig struct {
 }
 
 type ControllerConfig struct {
-	OIDC               OIDCConfig      `mapstructure:"oidc"`
-	PAM                PAMConfig       `mapstructure:"pam"`
-	TokenConfig        TokenConfig     `mapstructure:"token_config"`
-	LoginPage          LoginPageConfig `mapstructure:"login_page"`
-	Port               int             `mapstructure:"port"`
-	Hostname           string          `mapstructure:"hostname"`
-	FrontendDir        string          `mapstructure:"frontend_dir"`
-	SpawnerAddress     string          `mapstructure:"spawner_address"`
-	AuthMode           AuthMode        `mapstructure:"auth_mode"`
-	DBConnectionString string          `mapstructure:"db_conn_string"`
-	ApiPrefix          string          `mapstructure:"api_prefix"`
+	OIDC               OIDCConfig       `mapstructure:"oidc"`
+	PAM                PAMConfig        `mapstructure:"pam"`
+	TokenConfig        TokenConfig      `mapstructure:"token_config"`
+	LoginPage          LoginPageConfig  `mapstructure:"login_page"`
+	DeviceAuth         DeviceAuthConfig `mapstructure:"device_auth"`
+	Port               int              `mapstructure:"port"`
+	Hostname           string           `mapstructure:"hostname"`
+	FrontendDir        string           `mapstructure:"frontend_dir"`
+	SpawnerAddress     string           `mapstructure:"spawner_address"`
+	AuthMode           AuthMode         `mapstructure:"auth_mode"`
+	DBConnectionString string           `mapstructure:"db_conn_string"`
+	ApiPrefix          string           `mapstructure:"api_prefix"`
+
+	// PublicURL is the externally visible base URL of this controller (origin
+	// plus any path prefix added by a reverse proxy). It is used to build
+	// device verification links and as the default OIDC post-logout redirect.
+	PublicURL string `mapstructure:"public_url"`
+}
+
+// NormalizePublicURL validates raw as an absolute http(s) base URL and returns
+// it without a trailing slash. An empty string is returned unchanged.
+func NormalizePublicURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("invalid controller.public_url %q: must be an absolute http(s) URL without a query or fragment", raw)
+	}
+	return strings.TrimRight(raw, "/"), nil
+}
+
+// PublicBaseURL returns the configured externally visible base URL without a
+// trailing slash.
+func (c ControllerConfig) PublicBaseURL() string {
+	return strings.TrimRight(strings.TrimSpace(c.PublicURL), "/")
+}
+
+// OIDCPostLogoutRedirectURI returns the configured OIDC post-logout redirect
+// URI, defaulting to <public_url>/login when it is not set explicitly.
+func (c ControllerConfig) OIDCPostLogoutRedirectURI() string {
+	if uri := strings.TrimSpace(c.OIDC.PostLogoutRedirectURI); uri != "" {
+		return uri
+	}
+	if base := c.PublicBaseURL(); base != "" {
+		return base + "/login"
+	}
+	return ""
 }
 
 type SpawnerConfig struct {
@@ -89,13 +222,15 @@ func setControllerDefaults(v *viper.Viper) {
 	v.SetDefault("controller.frontend_dir", "")
 	v.SetDefault("controller.spawner_address", "http://localhost:8080")
 	v.SetDefault("controller.auth_mode", AuthNone)
+	v.SetDefault("controller.public_url", "")
 
 	v.SetDefault("controller.pam.service_name", "carta")
 	v.SetDefault("controller.oidc.issuer_url", "")
 	v.SetDefault("controller.oidc.client_id", "")
 	v.SetDefault("controller.oidc.client_secret", "")
 	v.SetDefault("controller.oidc.redirect_url", "")
-	v.SetDefault("controller.oidc.app_url", "")
+	v.SetDefault("controller.oidc.post_logout_redirect_uri", "")
+	v.SetDefault("controller.oidc.encryption_key_file", "")
 	v.SetDefault("controller.db_conn_string", "")
 	v.SetDefault("controller.api_prefix", "/api")
 
@@ -109,6 +244,13 @@ func setControllerDefaults(v *viper.Viper) {
 	v.SetDefault("controller.token_config.issuer", "carta-ctl")
 	v.SetDefault("controller.token_config.access_token_age", "10m")
 	v.SetDefault("controller.token_config.refresh_token_age", "24h")
+
+	v.SetDefault("controller.device_auth.enabled", false)
+	v.SetDefault("controller.device_auth.lifetime", "10m")
+	v.SetDefault("controller.device_auth.min_interval", "5s")
+	v.SetDefault("controller.device_auth.max_refresh_interval", "24h")
+	v.SetDefault("controller.device_auth.max_pending_per_ip", 10)
+	v.SetDefault("controller.device_auth.client_ip_header", "")
 
 }
 

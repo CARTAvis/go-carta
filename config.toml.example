@@ -31,6 +31,14 @@ port = 8081
 # Hostname to bind to. If this is empty, all interfaces will be used
 hostname = ""
 
+# Externally visible base URL of this controller (origin plus any path prefix
+# added by a reverse proxy). Used to build device verification links and as the
+# default OIDC post-logout redirect. Must be an absolute http(s) URL.
+# Required when device authorization is enabled. Examples:
+#   "https://carta.example.org"
+#   "https://example.org/carta"
+public_url = ""
+
 # Directory containing the CARTA frontend static files
 # If empty, the controller will not serve the frontend
 frontend_dir = ""
@@ -91,9 +99,20 @@ client_secret = ""
 # Example: "http://localhost:8081/api/auth/oidc_callback"
 redirect_url = ""
 
-# Public application URL used for OIDC logout redirects after sign-out.
+# Path to a file containing the key used to encrypt OIDC offline tokens before
+# they are stored in the database for device sessions. The file must contain
+# exactly 32 raw random bytes (AES-256-GCM), not base64 or hex, e.g. generated
+# with:
+#   sudo sh -c 'umask 077 && openssl rand -out /etc/carta/oidc_encryption.key 32'
+# Keep the file readable only by the user that runs carta-ctl.
+# Required when auth_mode is "oidc" or "both"; the controller refuses to start
+# if this is not set.
+encryption_key_file = ""
+
+# OIDC post-logout redirect URI. Defaults to `<public_url>/login` when empty.
+# Set explicitly if the identity provider requires a different registered URI.
 # Example: "http://localhost:8081/login"
-app_url = ""
+post_logout_redirect_uri = ""
 
 # ----------------------------------------------------------------------------
 # JWT Token Configuration
@@ -116,6 +135,51 @@ access_token_age = "10m"
 
 # Lifetime of refresh tokens.
 refresh_token_age = "24h"
+
+# ----------------------------------------------------------------------------
+# Device Authorization Configuration
+# ----------------------------------------------------------------------------
+[controller.device_auth]
+
+# Enable the device authorization flow (device_init, device_poll,
+# device_refresh, device_logout, and the /device_link approval page).
+# Disabled by default. When enabled, `controller.public_url` is required and the
+# controller will refuse to start without it.
+enabled = false
+
+# How long a pending device login (and its device code) remains valid.
+lifetime = "10m"
+
+# Minimum time a client must wait between polls for the login result.
+min_interval = "5s"
+
+# Maximum lifetime of a device key registration. The CLI can refresh its
+# access tokens for this long; after it expires the user must log in again.
+# For OIDC device sessions, each issued access token is additionally capped at
+# the expiry of the most recently retrieved upstream OIDC access token.
+max_refresh_interval = "24h"
+
+# How often expired pending device logins are purged from the database. If
+# empty, this defaults to half of `lifetime` (every 5m for the default 10m
+# lifetime). This is a background maintenance interval, not the polling rate.
+pending_purge_interval = ""
+
+# How often expired or revoked device sessions are purged from the database. If
+# empty, this defaults to `max_refresh_interval` / 24 (hourly for the default
+# 24h registration lifetime). This is a background maintenance interval.
+session_purge_interval = ""
+
+# Maximum number of pending (unexpired, unlinked) device logins allowed from a
+# single client IP address. Set to 0 to disable the limit. The default is
+# generous because a controller may run on a compute cluster where many users
+# share one egress IP; raise it if legitimate multi-user logins are rejected.
+max_pending_per_ip = 10
+
+# When non-empty, the client IP used for device-init rate limiting is read from
+# this request header (e.g. "X-Forwarded-For" or "X-Real-IP") instead of the
+# peer address. Only set this when the controller is behind a trusted reverse
+# proxy; the header is otherwise client-controlled and can bypass the limit.
+client_ip_header = ""
 
 # ============================================================================
 # Spawner Configuration

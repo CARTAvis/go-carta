@@ -41,7 +41,7 @@ func LogoutHandler(cfg *config.Config) http.HandlerFunc {
 		idTokenCookie, idTokenErr := r.Cookie("oidc_id_token")
 		logoutEndpointCookie, endpointErr := r.Cookie("oidc_logout_endpoint")
 		if idTokenErr == nil && endpointErr == nil && idTokenCookie.Value != "" && logoutEndpointCookie.Value != "" {
-			logoutURL := buildOIDCLogoutURL(logoutEndpointCookie.Value, idTokenCookie.Value, cfg.Controller.OIDC.AppURL)
+			logoutURL := buildOIDCLogoutURL(logoutEndpointCookie.Value, idTokenCookie.Value, cfg.Controller.OIDCPostLogoutRedirectURI())
 			http.Redirect(w, r, logoutURL, http.StatusFound)
 			return
 		}
@@ -62,7 +62,7 @@ func buildOIDCLogoutURL(logoutEndpoint, idTokenHint, postLogoutRedirectURI strin
 	if postLogoutRedirectURI != "" {
 		q.Set("post_logout_redirect_uri", postLogoutRedirectURI)
 	} else {
-		slog.Warn("OIDC app_url not configured, logout will not redirect to login page after logout")
+		slog.Warn("OIDC post-logout redirect URI not configured; logout will not redirect to the login page")
 	}
 	u.RawQuery = q.Encode()
 	return u.String()

@@ -9,11 +9,13 @@ import (
 	"unicode/utf8"
 
 	"database/sql"
+
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 
 	"embed"
 	"encoding/json"
+
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth"
@@ -63,55 +65,6 @@ type DbConfig struct {
 	LayoutSchema    *jsonschema.Schema
 	WorkspaceSchema *jsonschema.Schema
 	SnippetSchema   *jsonschema.Schema
-}
-
-func (h *DbConfig) EnsureTables() error {
-	schema := `
-    CREATE TABLE IF NOT EXISTS preferences (
-        username TEXT PRIMARY KEY,
-        content  JSONB NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS layouts (
-        name     TEXT NOT NULL,
-        username TEXT NOT NULL,
-        content  JSONB NOT NULL,
-        PRIMARY KEY (name, username)
-    );
-
-    CREATE TABLE IF NOT EXISTS snippets (
-        name     TEXT NOT NULL,
-        username TEXT NOT NULL,
-        content  JSONB NOT NULL,
-        PRIMARY KEY (name, username)
-    );
-
-	CREATE TABLE IF NOT EXISTS workspaces (
-		name     TEXT NOT NULL,
-		username TEXT NOT NULL,
-		id       UUID NOT NULL DEFAULT gen_random_uuid(),
-		content  JSONB NOT NULL,
-
-		-- Whether the workspace is shared with other users
-		shared   BOOLEAN,
-
-		-- Keep top-level 'id' out of the JSON content to avoid confusion
-		CONSTRAINT no_top_level_id CHECK (NOT (content ? 'id')),
-
-		-- But ensure it remains unique (if defined)
-		CONSTRAINT unique_workspace_id UNIQUE (id),
-
-		PRIMARY KEY (username, name)
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_workspaces_username
-    ON workspaces (username);
-    `
-
-	if _, err := h.db.Exec(schema); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (h *DbConfig) InitDb() {

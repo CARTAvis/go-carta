@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth"
 )
@@ -26,7 +27,7 @@ func RefreshHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionToken, err := auth.GenerateToken(claims.Username, auth.NormalizeSource(claims.Source), auth.TokenTypeAccess)
+	sessionToken, err := auth.GenerateToken(claims.Username, auth.NormalizeSource(claims.Source), auth.TokenTypeAccess, time.Time{})
 	if err != nil {
 		slog.Error("Failed to generate access token", "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)

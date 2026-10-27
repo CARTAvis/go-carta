@@ -23,6 +23,7 @@ type TokenClaims struct {
 	Username string    `json:"username"`
 	Source   Source    `json:"source,omitempty"`
 	Type     TokenType `json:"type"`
+
 	jwt.RegisteredClaims
 }
 
@@ -79,20 +80,29 @@ func InitJWT(cfg config.TokenConfig) error {
 	return nil
 }
 
-func GenerateToken(username string, source Source, tokenType TokenType) (string, error) {
+// GenerateToken creates a signed token. If expiresAt is zero, the configured
+// lifetime for the token type is used. A non-zero expiresAt must be in the
+// future; device sessions use this to cap tokens at the session expiry.
+func GenerateToken(username string, source Source, tokenType TokenType, expiresAt time.Time) (string, error) {
+	if expiresAt.IsZero() {
+		if tokenType == TokenTypeRefresh {
+			expiresAt = time.Now().Add(refreshTokenAgeDur)
+		} else {
+			expiresAt = time.Now().Add(accessTokenAgeDur)
+		}
+	} else if !expiresAt.After(time.Now()) {
+		return "", fmt.Errorf("token expiry must be in the future")
+	}
+
 	claims := TokenClaims{
 		Username: username,
 		Source:   NormalizeSource(source),
 		Type:     tokenType,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    tokenConfig.Issuer,
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(accessTokenAgeDur)),
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
-	}
-
-	if tokenType == TokenTypeRefresh {
-		claims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(refreshTokenAgeDur))
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
@@ -101,7 +111,7 @@ func GenerateToken(username string, source Source, tokenType TokenType) (string,
 
 // Helper: sets session cookie for a user.
 func SetRefreshTokenCookie(w http.ResponseWriter, username string, source Source) error {
-	token, err := GenerateToken(username, source, TokenTypeRefresh)
+	token, err := GenerateToken(username, source, TokenTypeRefresh, time.Time{})
 	if err != nil {
 		return err
 	}

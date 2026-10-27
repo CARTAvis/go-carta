@@ -2,11 +2,13 @@ package auth
 
 import (
 	"embed"
+	"errors"
 	"html/template"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/CARTAvis/go-carta/pkg/config"
 	"github.com/microcosm-cc/bluemonday"
@@ -20,6 +22,14 @@ var cartaLogoSVG []byte
 
 var loginTmpl = template.Must(
 	template.ParseFS(templates, "templates/login.html"),
+)
+
+var deviceLinkedTmpl = template.Must(
+	template.ParseFS(templates, "templates/device_linked.html"),
+)
+
+var deviceLinkTmpl = template.Must(
+	template.ParseFS(templates, "templates/device_link.html"),
 )
 
 var supportTextPolicy = func() *bluemonday.Policy {
@@ -37,6 +47,22 @@ func sanitizeSupportText(raw string) template.HTML {
 	return template.HTML(supportTextPolicy.Sanitize(raw))
 }
 
+// loginAction builds a login endpoint URL, carrying the optional redirect
+// parameters and device code through the auth flow.
+func loginAction(base, redirectParams, deviceCode string) string {
+	query := url.Values{}
+	if redirectParams != "" {
+		query.Set("redirectParams", redirectParams)
+	}
+	if deviceCode != "" {
+		query.Set("device_code", deviceCode)
+	}
+	if len(query) == 0 {
+		return base
+	}
+	return base + "?" + query.Encode()
+}
+
 // LoginPageData holds all the data needed to render the login page.
 type LoginPageData struct {
 	Title       string
@@ -51,9 +77,22 @@ type LoginPageData struct {
 	Error       string
 }
 
+// DeviceLinkPageData holds the data for the initial device approval page.
+type DeviceLinkPageData struct {
+	Title       string
+	Code        string
+	Fingerprint string
+	ConfirmCode string
+	Action      string
+	Error       string
+}
+
 // LoginPageHandler returns an http.Handler that renders the unified login page.
 // Elements specific to PAM and OIDC are included only when those auth modes are active.
-func LoginPageHandler(cfg *config.Config) http.Handler {
+//
+// A device login must be approved before the login page is rendered, so the
+// user always sees and confirms the key fingerprint before entering credentials.
+func LoginPageHandler(store PendingAuthStore, cfg *config.Config) http.Handler {
 	authMode := cfg.Controller.AuthMode
 	lp := cfg.Controller.LoginPage
 
@@ -80,13 +119,40 @@ func LoginPageHandler(cfg *config.Config) http.Handler {
 			return
 		}
 
-		pamAction := "/api/auth/pam_login"
-		oidcAction := "/api/auth/oidc_login"
-		if rp := r.URL.Query().Get("redirectParams"); rp != "" {
-			escaped := url.QueryEscape(rp)
-			pamAction += "?redirectParams=" + escaped
-			oidcAction += "?redirectParams=" + escaped
+		deviceCode := r.URL.Query().Get("device_code")
+		if deviceCode != "" {
+			if !validFingerprint(deviceCode) {
+				http.Error(w, "Invalid device code", http.StatusBadRequest)
+				return
+			}
+			if store == nil {
+				http.Error(w, "Device login is not enabled", http.StatusBadRequest)
+				return
+			}
+			record, err := store.GetPendingAuth(deviceCode)
+			if errors.Is(err, ErrPendingAuthNotFound) {
+				http.Error(w, "This device code is invalid, expired, or already used", http.StatusGone)
+				return
+			}
+			if err != nil {
+				slog.Error("Failed to load pending device login", "error", err)
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
+			}
+			if record.Username != "" || !time.Now().Before(record.ExpiresAt) {
+				http.Error(w, "This device code is invalid, expired, or already used", http.StatusGone)
+				return
+			}
+			if record.ApprovedAt == nil {
+				query := url.Values{}
+				query.Set("code", deviceCode)
+				http.Redirect(w, r, DeviceVerifyPath+"?"+query.Encode(), http.StatusSeeOther)
+				return
+			}
 		}
+
+		pamAction := loginAction("/api/auth/pam_login", r.URL.Query().Get("redirectParams"), deviceCode)
+		oidcAction := loginAction("/api/auth/oidc_login", r.URL.Query().Get("redirectParams"), deviceCode)
 
 		data := LoginPageData{
 			Title:       title,
@@ -127,5 +193,102 @@ func ServeSiteBanner(path string) http.Handler {
 			return
 		}
 		http.ServeFile(w, r, path)
+	})
+}
+
+// DeviceLinkPageHandler renders the initial device approval page. It shows the
+// key fingerprint before the user signs in and requires an explicit
+// confirmation that the fingerprint matches the client. Once approved, the
+// user is sent to the login page and the login handlers link the device
+// directly; there is no post-authentication confirmation step.
+func DeviceLinkPageHandler(store PendingAuthStore, cfg *config.Config) http.Handler {
+	title := cfg.Controller.LoginPage.Title
+	if title == "" {
+		title = "CARTA"
+	}
+
+	render := func(w http.ResponseWriter, code, errorMessage string) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		data := DeviceLinkPageData{
+			Title:       title,
+			Code:        code,
+			Fingerprint: code,
+			ConfirmCode: FingerprintPrefix(code),
+			Action:      DeviceVerifyPath,
+			Error:       errorMessage,
+		}
+		if err := deviceLinkTmpl.Execute(w, data); err != nil {
+			slog.Error("Failed to render device link page", "error", err)
+		}
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		code := r.URL.Query().Get("code")
+		if r.Method == http.MethodPost {
+			r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+			defer func() { _ = r.Body.Close() }()
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, "Invalid request", http.StatusBadRequest)
+				return
+			}
+			if submitted := r.PostForm.Get("code"); submitted != "" {
+				code = submitted
+			}
+		}
+		if !validFingerprint(code) {
+			http.Error(w, "Missing or invalid device code", http.StatusBadRequest)
+			return
+		}
+
+		record, err := store.GetPendingAuth(code)
+		if errors.Is(err, ErrPendingAuthNotFound) {
+			http.Error(w, "This device code is invalid, expired, or already used", http.StatusGone)
+			return
+		}
+		if err != nil {
+			slog.Error("Failed to load pending device login", "error", err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		if record.Username != "" || !time.Now().Before(record.ExpiresAt) {
+			http.Error(w, "This device code is invalid, expired, or already used", http.StatusGone)
+			return
+		}
+
+		if r.Method == http.MethodPost {
+			// The single confirmation box is the user's assertion that the
+			// fingerprint shown above matches the one displayed by the client.
+			if r.PostForm.Get("confirm") == "" {
+				render(w, code, "Please confirm that the fingerprint matches the client before continuing.")
+				return
+			}
+
+			approved, err := store.ApprovePendingAuth(code)
+			if err != nil {
+				slog.Error("Failed to approve device login", "error", err)
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
+			}
+			if !approved {
+				http.Error(w, "This device code is invalid, expired, or already used", http.StatusGone)
+				return
+			}
+
+			slog.Info("Approved device login fingerprint for sign-in")
+			query := url.Values{}
+			query.Set("device_code", code)
+			http.Redirect(w, r, "/login?"+query.Encode(), http.StatusSeeOther)
+			return
+		}
+
+		render(w, code, r.URL.Query().Get("error"))
 	})
 }

@@ -3,4 +3,7 @@ version: "2"
 formatters:
   enable:
     - gofmt
-  
+
+issues:
+  max-same-issues: 0
+  max-issues-per-linter: 0
