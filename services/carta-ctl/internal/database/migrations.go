@@ -58,8 +58,21 @@ func (h *DbConfig) EnsureTables() error {
 		}
 	}()
 
-	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+	err = m.Up()
+	if errors.Is(err, migrate.ErrNoChange) {
+		slog.Debug("Database schema is already up to date")
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("applying schema migrations: %w", err)
+	}
+
+	// Up returns nil only when at least one migration was applied.
+	version, dirty, versionErr := m.Version()
+	if versionErr != nil {
+		slog.Info("Applied database schema migrations", "version_err", versionErr)
+	} else {
+		slog.Info("Applied database schema migrations", "version", version, "dirty", dirty)
 	}
 	return nil
 }
