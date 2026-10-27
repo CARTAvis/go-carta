@@ -144,8 +144,8 @@ max_refresh_interval = "24h"
 
 # Public base URL of this server, used to build the verification link shown to
 # the user (e.g. "https://carta.example.org"). Must be an absolute http(s) URL.
-# If empty, the URL is derived from the incoming request's Host header, which
-# is less safe behind proxies and should be avoided in production.
+# Required for device authorization: the controller refuses to start without it
+# so verification links cannot be poisoned via a spoofed Host header.
 public_url = ""
 
 # How often expired pending device logins are purged from the database. If

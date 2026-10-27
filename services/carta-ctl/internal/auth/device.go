@@ -247,15 +247,6 @@ type OIDCTokenRefresher interface {
 	RefreshAccessToken(ctx context.Context, encryptedOfflineToken []byte) (newEncryptedOfflineToken []byte, accessTokenExpiry time.Time, err error)
 }
 
-// requestOrigin derives the origin from the request. Used only when no public URL is configured.
-func requestOrigin(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "https"
-	}
-	return scheme + "://" + r.Host
-}
-
 // normalizeIP parses s as an IP address and returns its canonical string form.
 // IPv4-mapped IPv6 addresses are un-mapped to their IPv4 form so a client
 // always maps to the same key. When s is not a valid IP, it is returned
@@ -411,14 +402,16 @@ func DeviceInitHandler(store PendingAuthStore, cfg config.DeviceAuthConfig) (htt
 	}
 	minIntervalSecs := int(minInterval.Seconds())
 
+	// Device verification links must be built from a configured, trusted base
+	// URL. Deriving them from the request's Host header would let an attacker
+	// poison the link, so public_url is required when device auth is enabled.
 	publicURL := strings.TrimRight(strings.TrimSpace(cfg.PublicURL), "/")
-	if publicURL != "" {
-		u, err := url.Parse(publicURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return nil, fmt.Errorf("invalid controller.device_auth.public_url %q: must be an absolute http(s) URL", cfg.PublicURL)
-		}
-	} else {
-		slog.Warn("controller.device_auth.public_url is not set; deriving device verification URLs from the request Host header")
+	if publicURL == "" {
+		return nil, fmt.Errorf("controller.device_auth.public_url must be set to enable device authorization")
+	}
+	u, err := url.Parse(publicURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("invalid controller.device_auth.public_url %q: must be an absolute http(s) URL", cfg.PublicURL)
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -462,9 +455,6 @@ func DeviceInitHandler(store PendingAuthStore, cfg config.DeviceAuthConfig) (htt
 		}
 
 		base := publicURL
-		if base == "" {
-			base = requestOrigin(r)
-		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
