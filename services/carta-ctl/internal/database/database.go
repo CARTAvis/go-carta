@@ -114,9 +114,11 @@ func (h *DbConfig) EnsureTables() error {
 	CREATE TABLE IF NOT EXISTS auth_pending (
 		key_fingerprint   TEXT        PRIMARY KEY,
 		client_public_key TEXT        NOT NULL,
+		request_ip        TEXT        NOT NULL,
 		expires_at        TIMESTAMPTZ NOT NULL,
 
-		-- Client timestamp of the last accepted poll (enforces interval and prevents replay)
+		-- Server time (Unix seconds) of the last accepted poll (enforces the
+		-- polling interval against the server clock and bounds replay)
 		last_poll_ts      BIGINT,
 
 		-- Set once the user has authenticated and linked the key to their account
@@ -131,6 +133,14 @@ func (h *DbConfig) EnsureTables() error {
 		oidc_refresh_token BYTEA,
 		oidc_access_expiry TIMESTAMPTZ
 	);
+
+	-- Support per-IP rate limiting of pending device logins and the purge of
+	-- expired rows.
+	CREATE INDEX IF NOT EXISTS idx_auth_pending_request_ip
+	ON auth_pending (request_ip);
+
+	CREATE INDEX IF NOT EXISTS idx_auth_pending_expires_at
+	ON auth_pending (expires_at);
 
 	CREATE TABLE IF NOT EXISTS auth_sessions (
 		key_fingerprint         TEXT        PRIMARY KEY,

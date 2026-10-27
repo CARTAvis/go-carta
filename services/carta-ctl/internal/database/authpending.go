@@ -17,18 +17,54 @@ func (h *DbConfig) PurgeExpiredPendingAuth() error {
 }
 
 // CreatePendingAuth inserts a new pending device login keyed by the public key fingerprint.
-// It returns auth.ErrKeyAlreadyRegistered if that key is already pending.
-func (h *DbConfig) CreatePendingAuth(keyFingerprint, clientPublicKey string, expiresAt time.Time) error {
-	_, err := h.db.Exec(
-		`INSERT INTO auth_pending (key_fingerprint, client_public_key, expires_at)
-		 VALUES ($1, $2, $3)`,
-		keyFingerprint, clientPublicKey, expiresAt,
-	)
-	var pqErr *pq.Error
-	if errors.As(err, &pqErr) && pqErr.Code == "23505" {
-		return auth.ErrKeyAlreadyRegistered
+// It returns auth.ErrKeyAlreadyRegistered if that key is already pending, and
+// auth.ErrTooManyPendingAuths if maxPendingPerIP is positive and there are
+// already that many unexpired pending logins from requestIP.
+//
+// The count check and insert run in a single transaction guarded by a per-IP
+// advisory lock so concurrent requests from the same IP cannot both pass the
+// check and exceed the cap.
+func (h *DbConfig) CreatePendingAuth(keyFingerprint, clientPublicKey, requestIP string, expiresAt time.Time, maxPendingPerIP int) error {
+	tx, err := h.db.Beginx()
+	if err != nil {
+		return err
 	}
-	return err
+	defer func() {
+		// Rollback is a no-op after a successful commit (sql.ErrTxDone).
+		_ = tx.Rollback()
+	}()
+
+	// Serialize device-init for this IP so the count check and insert are atomic.
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, requestIP); err != nil {
+		return err
+	}
+
+	if maxPendingPerIP > 0 {
+		var count int
+		if err := tx.Get(&count,
+			`SELECT count(*) FROM auth_pending WHERE request_ip = $1 AND expires_at > NOW()`,
+			requestIP,
+		); err != nil {
+			return err
+		}
+		if count >= maxPendingPerIP {
+			return auth.ErrTooManyPendingAuths
+		}
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO auth_pending (key_fingerprint, client_public_key, request_ip, expires_at)
+		 VALUES ($1, $2, $3, $4)`,
+		keyFingerprint, clientPublicKey, requestIP, expiresAt,
+	); err != nil {
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+			return auth.ErrKeyAlreadyRegistered
+		}
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // GetPendingAuth loads a pending device login by key fingerprint. It returns
@@ -36,6 +72,7 @@ func (h *DbConfig) CreatePendingAuth(keyFingerprint, clientPublicKey string, exp
 func (h *DbConfig) GetPendingAuth(keyFingerprint string) (*auth.PendingAuthRecord, error) {
 	var row struct {
 		ClientPublicKey  string         `db:"client_public_key"`
+		RequestIP        string         `db:"request_ip"`
 		ExpiresAt        time.Time      `db:"expires_at"`
 		LastPollTS       sql.NullInt64  `db:"last_poll_ts"`
 		Username         sql.NullString `db:"username"`
@@ -45,7 +82,7 @@ func (h *DbConfig) GetPendingAuth(keyFingerprint string) (*auth.PendingAuthRecor
 	}
 	err := h.db.Get(
 		&row,
-		`SELECT client_public_key, expires_at, last_poll_ts, username, source,
+		`SELECT client_public_key, request_ip, expires_at, last_poll_ts, username, source,
 		        oidc_refresh_token, oidc_access_expiry
 		 FROM auth_pending
 		 WHERE key_fingerprint = $1`,
@@ -65,6 +102,7 @@ func (h *DbConfig) GetPendingAuth(keyFingerprint string) (*auth.PendingAuthRecor
 
 	record := &auth.PendingAuthRecord{
 		ClientPublicKey:  row.ClientPublicKey,
+		RequestIP:        row.RequestIP,
 		ExpiresAt:        row.ExpiresAt,
 		Username:         row.Username.String,
 		Source:           source,
@@ -81,17 +119,17 @@ func (h *DbConfig) GetPendingAuth(keyFingerprint string) (*auth.PendingAuthRecor
 	return record, nil
 }
 
-// RecordPendingAuthPoll stores the client timestamp of an accepted poll. It
-// reports whether the timestamp was stored: false means the record no longer
-// exists or a newer poll was already recorded.
-func (h *DbConfig) RecordPendingAuthPoll(keyFingerprint string, timestamp int64) (bool, error) {
+// RecordPendingAuthPoll records the server time (Unix seconds) of an accepted
+// poll. It reports whether the time was stored: false means the record no
+// longer exists or a newer poll was already recorded.
+func (h *DbConfig) RecordPendingAuthPoll(keyFingerprint string, pollAt int64) (bool, error) {
 	res, err := h.db.Exec(
 		`UPDATE auth_pending
 		 SET last_poll_ts = $2
 		 WHERE key_fingerprint = $1
 		   AND expires_at > NOW()
 		   AND (last_poll_ts IS NULL OR last_poll_ts < $2)`,
-		keyFingerprint, timestamp,
+		keyFingerprint, pollAt,
 	)
 	if err != nil {
 		return false, err
@@ -123,15 +161,31 @@ func (h *DbConfig) ConsumePendingAuth(keyFingerprint string) (string, bool, erro
 	return username, true, nil
 }
 
-// LinkPendingAuth associates a pending device login with a user and records
-// the authentication source. It reports whether a link was made: false means
-// the fingerprint is unknown, expired, or was already linked.
-func (h *DbConfig) LinkPendingAuth(keyFingerprint, username string, source auth.Source) (bool, error) {
+// LinkPendingAuth associates a pending device login with a user and records the
+// authentication source, the encrypted offline token, and the upstream
+// access-token expiry in a single atomic UPDATE so the token is bound to the
+// identity that links it. oidcRefreshToken/oidcAccessExpiry are nil/zero for
+// PAM logins, in which case those columns are written as NULL. It reports
+// whether a link was made: false means the fingerprint is unknown, expired, or
+// was already linked.
+func (h *DbConfig) LinkPendingAuth(keyFingerprint, username string, source auth.Source, oidcRefreshToken []byte, oidcAccessExpiry int64) (bool, error) {
+	// A nil/zero token writes NULL; otherwise pass the concrete value so the
+	// driver emits a proper BYTEA/TIMESTAMPTZ.
+	var refreshToken any
+	if oidcRefreshToken != nil {
+		refreshToken = oidcRefreshToken
+	}
+	var accessExpiry any
+	if oidcAccessExpiry > 0 {
+		accessExpiry = time.Unix(oidcAccessExpiry, 0)
+	}
+
 	res, err := h.db.Exec(
 		`UPDATE auth_pending
-		 SET username = $2, linked_at = NOW(), source = $3
+		 SET username = $2, linked_at = NOW(), source = $3,
+		     oidc_refresh_token = $4, oidc_access_expiry = $5
 		 WHERE key_fingerprint = $1 AND expires_at > NOW() AND username IS NULL`,
-		keyFingerprint, username, string(auth.NormalizeSource(source)),
+		keyFingerprint, username, string(auth.NormalizeSource(source)), refreshToken, accessExpiry,
 	)
 	if err != nil {
 		return false, err
@@ -141,27 +195,4 @@ func (h *DbConfig) LinkPendingAuth(keyFingerprint, username string, source auth.
 		return false, err
 	}
 	return n == 1, nil
-}
-
-// StorePendingAuthOIDCToken records the encrypted offline token and the
-// upstream access-token expiry for an unexpired pending OIDC device login. It
-// reports whether the pending login was found and updated.
-func (h *DbConfig) StorePendingAuthOIDCToken(keyFingerprint string, encryptedOfflineToken []byte, accessExpiry time.Time) error {
-	res, err := h.db.Exec(
-		`UPDATE auth_pending
-		 SET oidc_refresh_token = $2, oidc_access_expiry = $3
-		 WHERE key_fingerprint = $1 AND expires_at > NOW()`,
-		keyFingerprint, encryptedOfflineToken, accessExpiry,
-	)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return auth.ErrPendingAuthNotFound
-	}
-	return nil
 }

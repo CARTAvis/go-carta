@@ -29,10 +29,6 @@ type OIDCAuthenticator struct {
 	// cipher encrypts/decrypts OIDC offline tokens for device sessions. It is
 	// nil when no encryption key file has been configured.
 	cipher *tokenCipher
-
-	// pending stores the encrypted offline token alongside a pending device
-	// login. It is wired via SetPendingAuthStore once the database is ready.
-	pending auth.PendingAuthStore
 }
 
 func New(cfg config.OIDCConfig) (*OIDCAuthenticator, error) {
@@ -95,13 +91,6 @@ func New(cfg config.OIDCConfig) (*OIDCAuthenticator, error) {
 		oauth2:   oauth2cfg,
 		cipher:   cipher,
 	}, nil
-}
-
-// SetPendingAuthStore wires the device-login store into the authenticator so
-// device logins can persist their encrypted offline token. It must be called
-// once the database is initialised, before the OIDC endpoints receive traffic.
-func (o *OIDCAuthenticator) SetPendingAuthStore(store auth.PendingAuthStore) {
-	o.pending = store
 }
 
 // RefreshAccessToken implements auth.OIDCTokenRefresher. It decrypts the
@@ -414,29 +403,31 @@ func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Reque
 	// against the pending login so the device session can refresh its upstream
 	// access token later.
 	if deviceCode != "" {
-		if o.pending == nil || o.cipher == nil {
-			slog.Error("OIDC: device login attempted without a device store or encryption key", "key_fingerprint", deviceCode)
-			http.Error(w, "Device login is not configured", http.StatusInternalServerError)
-			return
-		}
-
+		// Encrypt the offline token and carry it in the device-link ticket so it
+		// is written to the session atomically with the linking identity at link
+		// time. It must not be persisted against the pending login here, or the
+		// token could become detached from the user who ultimately links.
+		var encryptedRefreshToken []byte
+		var accessExpiry int64
 		if oauth2Token.RefreshToken == "" {
 			slog.Warn("OIDC: device login received no offline (refresh) token; the session cannot be refreshed", "key_fingerprint", deviceCode)
 		} else {
+			if o.cipher == nil {
+				slog.Error("OIDC: device login received an offline token but no encryption key is configured", "key_fingerprint", deviceCode)
+				http.Error(w, "Device login is not configured", http.StatusInternalServerError)
+				return
+			}
 			encrypted, err := o.cipher.Encrypt([]byte(oauth2Token.RefreshToken))
 			if err != nil {
 				slog.Error("OIDC: failed to encrypt offline token", "username", user.Username, "error", err)
 				http.Error(w, "Session error", http.StatusInternalServerError)
 				return
 			}
-			if err := o.pending.StorePendingAuthOIDCToken(deviceCode, encrypted, oauth2Token.Expiry); err != nil {
-				slog.Error("OIDC: failed to store offline token", "username", user.Username, "error", err)
-				http.Error(w, "Session error", http.StatusInternalServerError)
-				return
-			}
+			encryptedRefreshToken = encrypted
+			accessExpiry = oauth2Token.Expiry.Unix()
 		}
 
-		if err := auth.SetDeviceLinkCookie(w, user.Username, user.Source, deviceCode); err != nil {
+		if err := auth.SetDeviceLinkCookie(w, user.Username, user.Source, deviceCode, encryptedRefreshToken, accessExpiry); err != nil {
 			slog.Error("OIDC: failed to create device link ticket", "username", user.Username, "error", err)
 			http.Error(w, "Session error", http.StatusInternalServerError)
 			return

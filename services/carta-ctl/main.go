@@ -169,7 +169,6 @@ func main() {
 				if cfg.Controller.OIDC.EncryptionKeyFile == "" {
 					slog.Warn("OIDC device sessions require controller.oidc.encryption_key_file; OIDC device login will fail until it is configured")
 				}
-				oidcAuth.SetPendingAuthStore(&db)
 				oidcRefresher = oidcAuth
 			}
 

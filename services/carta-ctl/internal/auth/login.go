@@ -218,7 +218,7 @@ func DeviceLinkPageHandler(store PendingAuthStore, cfg *config.Config) http.Hand
 			return
 		}
 
-		user, ok := deviceLinkUser(r, code)
+		user, claims, ok := deviceLinkUser(r, code)
 		if !ok {
 			clearDeviceLinkCookie(w)
 			query := url.Values{}
@@ -230,7 +230,9 @@ func DeviceLinkPageHandler(store PendingAuthStore, cfg *config.Config) http.Hand
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 		if r.Method == http.MethodPost {
-			linked, err := store.LinkPendingAuth(code, user.Username, user.Source)
+			// Write the identity and the (encrypted) OIDC offline token together
+			// so the token is bound to the user who linked the login.
+			linked, err := store.LinkPendingAuth(code, user.Username, user.Source, claims.OIDCRefreshToken, claims.OIDCAccessExpiry)
 			if err != nil {
 				slog.Error("Failed to link device login", "username", user.Username, "error", err)
 				http.Error(w, "Internal server error", http.StatusInternalServerError)

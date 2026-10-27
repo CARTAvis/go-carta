@@ -62,7 +62,7 @@ func NewLoginHandler(p loginAuthenticator) http.Handler {
 				}
 				// Authenticate the browser for the device confirmation step
 				// without starting a browser session.
-				if err := auth.SetDeviceLinkCookie(w, user.Username, user.Source, deviceCode); err != nil {
+				if err := auth.SetDeviceLinkCookie(w, user.Username, user.Source, deviceCode, nil, 0); err != nil {
 					slog.Error("Failed to create device link ticket", "username", user.Username, "error", err)
 					http.Error(w, "Session error", http.StatusInternalServerError)
 					return

@@ -158,6 +158,18 @@ pending_purge_interval = ""
 # 24h registration lifetime). This is a background maintenance interval.
 session_purge_interval = ""
 
+# Maximum number of pending (unexpired, unlinked) device logins allowed from a
+# single client IP address. Set to 0 to disable the limit. The default is
+# generous because a controller may run on a compute cluster where many users
+# share one egress IP; raise it if legitimate multi-user logins are rejected.
+max_pending_per_ip = 10
+
+# When non-empty, the client IP used for device-init rate limiting is read from
+# this request header (e.g. "X-Forwarded-For" or "X-Real-IP") instead of the
+# peer address. Only set this when the controller is behind a trusted reverse
+# proxy; the header is otherwise client-controlled and can bypass the limit.
+client_ip_header = ""
+
 # ============================================================================
 # Spawner Configuration
 # ============================================================================

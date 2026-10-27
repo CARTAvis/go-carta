@@ -63,6 +63,19 @@ type DeviceAuthConfig struct {
 	// removed. When unset it defaults to max_refresh_interval / 24 (hourly for
 	// the default 24h registration lifetime).
 	SessionPurgeInterval string `mapstructure:"session_purge_interval"`
+
+	// MaxPendingPerIP caps the number of unexpired, unlinked device logins that
+	// may be pending from a single client IP address. A value <= 0 disables the
+	// limit. The default is deliberately generous: a controller may be deployed
+	// on a compute cluster where many distinct users share a single egress IP.
+	MaxPendingPerIP int `mapstructure:"max_pending_per_ip"`
+
+	// ClientIPHeader, when non-empty, names a request header (for example
+	// "X-Forwarded-For" or "X-Real-IP") whose value is used as the client IP for
+	// device-init rate limiting instead of the peer address in RemoteAddr. Only
+	// set this when the controller sits behind a trusted reverse proxy; the
+	// header is otherwise client-controlled and can bypass the per-IP limit.
+	ClientIPHeader string `mapstructure:"client_ip_header"`
 }
 
 // parseDeviceDuration parses a device_auth duration value that must be positive.
@@ -187,6 +200,8 @@ func setControllerDefaults(v *viper.Viper) {
 	v.SetDefault("controller.device_auth.min_interval", "5s")
 	v.SetDefault("controller.device_auth.max_refresh_interval", "24h")
 	v.SetDefault("controller.device_auth.public_url", "")
+	v.SetDefault("controller.device_auth.max_pending_per_ip", 10)
+	v.SetDefault("controller.device_auth.client_ip_header", "")
 
 }
 

@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -27,10 +29,21 @@ const (
 	// user authenticated for a specific device login.
 	deviceLinkCookieName = "carta_device_link"
 	deviceLinkTicketAge  = 5 * time.Minute
+
+	// deviceTimestampSkew is the maximum allowed difference between a client's
+	// signed request timestamp and the server clock. Timestamps outside this
+	// window are rejected so a mis-set client clock can neither bypass the poll
+	// interval nor lock the client out of its own login, and so a captured
+	// signed request has only a bounded replay window.
+	deviceTimestampSkew = 5 * time.Minute
 )
 
 // ErrKeyAlreadyRegistered is returned when a public key already has a pending login.
 var ErrKeyAlreadyRegistered = errors.New("public key already registered")
+
+// ErrTooManyPendingAuths is returned when the number of outstanding pending
+// device logins from a single client IP has reached the configured limit.
+var ErrTooManyPendingAuths = errors.New("too many pending device logins from this address")
 
 // ErrPendingAuthNotFound is returned when no pending login matches a key fingerprint.
 var ErrPendingAuthNotFound = errors.New("pending device login not found")
@@ -110,9 +123,15 @@ func deviceLogoutMessage(keyFingerprint string, timestamp int64) []byte {
 type PendingAuthRecord struct {
 	// ClientPublicKey is the base64url (unpadded) Ed25519 public key registered at device_init.
 	ClientPublicKey string
+	// RequestIP is the client IP address recorded at device_init, used for
+	// per-IP rate limiting. It is empty for rows created before this field was
+	// introduced.
+	RequestIP string
 	// ExpiresAt is when the pending login stops being valid.
 	ExpiresAt time.Time
-	// LastPollTS is the client timestamp of the last accepted poll, if any.
+	// LastPollTS is the server time (Unix seconds) of the last accepted poll, if
+	// any. It is used to enforce the polling interval against the server clock,
+	// never against the client-supplied timestamp.
 	LastPollTS *int64
 	// Username is empty until the login has been linked to a user account.
 	Username string
@@ -130,19 +149,21 @@ type PendingAuthRecord struct {
 // PendingAuthStore persists in-flight device logins.
 type PendingAuthStore interface {
 	// CreatePendingAuth stores a new pending device login, keyed by the fingerprint of the client's public key.
-	CreatePendingAuth(keyFingerprint, clientPublicKey string, expiresAt time.Time) error
+	// requestIP is the client IP address used for per-IP rate limiting; maxPendingPerIP caps the number of
+	// outstanding pending logins allowed from that IP (<= 0 disables the limit).
+	CreatePendingAuth(keyFingerprint, clientPublicKey, requestIP string, expiresAt time.Time, maxPendingPerIP int) error
 	// GetPendingAuth loads a pending device login by key fingerprint, returning
 	// ErrPendingAuthNotFound when there is no matching record.
 	GetPendingAuth(keyFingerprint string) (*PendingAuthRecord, error)
 	// LinkPendingAuth links an unexpired, unlinked login to a user and records
-	// the authentication source, reporting whether it did so.
-	LinkPendingAuth(keyFingerprint, username string, source Source) (bool, error)
-	// StorePendingAuthOIDCToken records the encrypted offline token and the
-	// upstream access-token expiry for an OIDC device login.
-	StorePendingAuthOIDCToken(keyFingerprint string, encryptedOfflineToken []byte, accessExpiry time.Time) error
-	// RecordPendingAuthPoll stores the client timestamp of an accepted poll.
-	// It reports false when a newer poll timestamp was already recorded.
-	RecordPendingAuthPoll(keyFingerprint string, timestamp int64) (bool, error)
+	// the authentication source, the encrypted offline token, and the upstream
+	// access-token expiry in a single atomic operation so the token is bound to
+	// the linking identity. oidcRefreshToken and oidcAccessExpiry are nil/zero
+	// for PAM logins. It reports whether it did so.
+	LinkPendingAuth(keyFingerprint, username string, source Source, oidcRefreshToken []byte, oidcAccessExpiry int64) (bool, error)
+	// RecordPendingAuthPoll records the server time (Unix seconds) of an accepted
+	// poll. It reports false when a newer server time was already recorded.
+	RecordPendingAuthPoll(keyFingerprint string, pollAt int64) (bool, error)
 	// ConsumePendingAuth deletes a linked, unexpired login and returns the
 	// username it was linked to. It reports false when there is nothing to
 	// collect, so exactly one polling client obtains the session.
@@ -235,6 +256,38 @@ func requestOrigin(r *http.Request) string {
 	return scheme + "://" + r.Host
 }
 
+// normalizeIP parses s as an IP address and returns its canonical string form.
+// IPv4-mapped IPv6 addresses are un-mapped to their IPv4 form so a client
+// always maps to the same key. When s is not a valid IP, it is returned
+// trimmed and unchanged.
+func normalizeIP(s string) string {
+	s = strings.TrimSpace(s)
+	if addr, err := netip.ParseAddr(s); err == nil {
+		return addr.Unmap().String()
+	}
+	return s
+}
+
+// clientIP returns the client IP address for a request. When headerName is
+// non-empty and the named header is present, its first comma-separated value is
+// used (for X-Forwarded-For style headers); otherwise the peer address from
+// RemoteAddr is used.
+func clientIP(r *http.Request, headerName string) string {
+	if headerName != "" {
+		if v := r.Header.Get(headerName); v != "" {
+			if i := strings.IndexByte(v, ','); i >= 0 {
+				v = v[:i]
+			}
+			return normalizeIP(v)
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	return normalizeIP(host)
+}
+
 func writeJSONError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -317,6 +370,15 @@ func readDeviceSignedRequest(w http.ResponseWriter, r *http.Request) (deviceSign
 		writeJSONError(w, http.StatusBadRequest, "timestamp must be a positive Unix time in seconds")
 		return req, nil, false
 	}
+
+	// The client timestamp must be within a bounded window of the server clock.
+	// This prevents a mis-set clock from bypassing the poll interval or locking
+	// the client out, and bounds the replay window for a captured signed request.
+	if diff := time.Now().Unix() - req.Timestamp; diff > int64(deviceTimestampSkew/time.Second) || diff < -int64(deviceTimestampSkew/time.Second) {
+		writeJSONError(w, http.StatusBadRequest, "timestamp is too far from the server clock")
+		return req, nil, false
+	}
+
 	signature, err := base64.RawURLEncoding.DecodeString(req.Signature)
 	if err != nil || len(signature) != ed25519.SignatureSize {
 		writeJSONError(w, http.StatusBadRequest, "signature must be a base64url (unpadded) Ed25519 signature")
@@ -383,14 +445,19 @@ func DeviceInitHandler(store PendingAuthStore, cfg config.DeviceAuthConfig) (htt
 		}
 
 		fingerprint := KeyFingerprint(keyBytes)
+		requestIP := clientIP(r, cfg.ClientIPHeader)
 
-		if err := store.CreatePendingAuth(fingerprint, req.PublicKey, time.Now().Add(lifetime)); err != nil {
-			if errors.Is(err, ErrKeyAlreadyRegistered) {
+		if err := store.CreatePendingAuth(fingerprint, req.PublicKey, requestIP, time.Now().Add(lifetime), cfg.MaxPendingPerIP); err != nil {
+			switch {
+			case errors.Is(err, ErrKeyAlreadyRegistered):
 				writeJSONError(w, http.StatusConflict, "This public key is already registered; generate a new keypair")
-				return
+			case errors.Is(err, ErrTooManyPendingAuths):
+				w.Header().Set("Retry-After", strconv.Itoa(minIntervalSecs))
+				writeJSONError(w, http.StatusTooManyRequests, "Too many pending device logins from this address; try again later")
+			default:
+				slog.Error("Failed to create pending auth record", "err", err)
+				writeJSONError(w, http.StatusInternalServerError, "Internal server error")
 			}
-			slog.Error("Failed to create pending auth record", "err", err)
-			writeJSONError(w, http.StatusInternalServerError, "Internal server error")
 			return
 		}
 
@@ -416,8 +483,9 @@ func DeviceInitHandler(store PendingAuthStore, cfg config.DeviceAuthConfig) (htt
 
 // DevicePollHandler lets the client that started a device login collect an
 // access token once the user has linked it in the browser. Each request must
-// be signed with the registered private key and carry a strictly increasing
-// timestamp, which enforces the polling interval and prevents replay.
+// be signed with the registered private key and carry a timestamp within a
+// bounded window of the server clock (see deviceTimestampSkew). The polling
+// interval is enforced against the server clock, not the client timestamp.
 //
 // For OIDC device sessions, the offline token stored with the pending login is
 // used to obtain a fresh upstream access token when needed (see
@@ -427,7 +495,6 @@ func DeviceInitHandler(store PendingAuthStore, cfg config.DeviceAuthConfig) (htt
 //   - 202 Accepted: the login is still pending.
 //   - 200 OK: the login was linked; an access token and the session expiry are returned.
 //   - 429 Too Many Requests: the client polled again before the minimum interval.
-//   - 409 Conflict: the signed timestamp is not newer than the previous poll.
 //   - 410 Gone: the login is unknown, expired, or was already collected.
 func DevicePollHandler(store PendingAuthStore, sessions AuthSessionStore, cfg config.DeviceAuthConfig, refresher OIDCTokenRefresher) (http.Handler, error) {
 	minInterval, err := time.ParseDuration(cfg.MinInterval)
@@ -481,21 +548,18 @@ func DevicePollHandler(store PendingAuthStore, sessions AuthSessionStore, cfg co
 			return
 		}
 
-		// The client timestamp enforces the polling interval and rejects replays.
-		if record.LastPollTS != nil {
-			if req.Timestamp <= *record.LastPollTS {
-				writeJSONError(w, http.StatusConflict, "Poll timestamp is not newer than the previous poll")
-				return
-			}
-			if req.Timestamp < *record.LastPollTS+int64(intervalSecs) {
+		if record.Username == "" {
+			// Enforce the polling interval against the server clock, not the
+			// client-supplied timestamp, so a client cannot shorten the interval
+			// by advancing its own clock.
+			nowUnix := time.Now().Unix()
+			if record.LastPollTS != nil && nowUnix < *record.LastPollTS+int64(intervalSecs) {
 				w.Header().Set("Retry-After", strconv.Itoa(intervalSecs))
 				writeJSONError(w, http.StatusTooManyRequests, fmt.Sprintf("Polling too frequently; retry after %d seconds", intervalSecs))
 				return
 			}
-		}
 
-		if record.Username == "" {
-			accepted, err := store.RecordPendingAuthPoll(req.KeyFingerprint, req.Timestamp)
+			accepted, err := store.RecordPendingAuthPoll(req.KeyFingerprint, nowUnix)
 			if err != nil {
 				slog.Error("Failed to record device poll", "err", err)
 				writeJSONError(w, http.StatusInternalServerError, "Internal server error")
@@ -814,8 +878,11 @@ func DeviceLogoutHandler(sessions AuthSessionStore) http.Handler {
 
 // SetDeviceLinkCookie records that the browser user authenticated for a
 // specific device login. The signed token is bound to the device code and is
-// accepted only by the device confirmation page.
-func SetDeviceLinkCookie(w http.ResponseWriter, username string, source Source, deviceCode string) error {
+// accepted only by the device confirmation page. For OIDC device logins it also
+// carries the encrypted offline token and its upstream access-token expiry
+// (nil/zero for PAM) so they can be persisted together with the identity at
+// link time.
+func SetDeviceLinkCookie(w http.ResponseWriter, username string, source Source, deviceCode string, oidcRefreshToken []byte, oidcAccessExpiry int64) error {
 	if username == "" {
 		return fmt.Errorf("username is required")
 	}
@@ -824,7 +891,7 @@ func SetDeviceLinkCookie(w http.ResponseWriter, username string, source Source, 
 	}
 
 	expiresAt := time.Now().Add(deviceLinkTicketAge)
-	token, err := GenerateDeviceLinkToken(username, source, deviceCode, expiresAt)
+	token, err := GenerateDeviceLinkToken(username, source, deviceCode, oidcRefreshToken, oidcAccessExpiry, expiresAt)
 	if err != nil {
 		return err
 	}
@@ -855,24 +922,27 @@ func clearDeviceLinkCookie(w http.ResponseWriter) {
 	})
 }
 
-// deviceLinkUser returns the authenticated user from a device-link ticket when
-// the ticket was issued for the given device code.
-func deviceLinkUser(r *http.Request, deviceCode string) (*User, bool) {
+// deviceLinkUser returns the authenticated user and the ticket claims from a
+// device-link ticket when the ticket was issued for the given device code. The
+// claims are returned so the caller can persist the ticket's OIDC offline token
+// and expiry together with the linking identity.
+func deviceLinkUser(r *http.Request, deviceCode string) (*User, *TokenClaims, bool) {
 	cookie, err := r.Cookie(deviceLinkCookieName)
 	if err != nil {
-		return nil, false
+		return nil, nil, false
 	}
 
 	claims, err := VerifyToken(cookie.Value)
 	if err != nil || claims.Type != TokenTypeDeviceLink || claims.DeviceCode != deviceCode || claims.Username == "" {
-		return nil, false
+		return nil, nil, false
 	}
 
-	return &User{
+	user := &User{
 		Username: claims.Username,
 		Source:   NormalizeSource(claims.Source),
 		Claims:   map[string]any{},
-	}, true
+	}
+	return user, claims, true
 }
 
 // WriteDeviceLinkedPage renders the page shown after a device login has been
