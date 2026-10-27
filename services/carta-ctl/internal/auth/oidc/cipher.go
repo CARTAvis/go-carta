@@ -28,7 +28,7 @@ func loadEncryptionKey(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read OIDC encryption key file %q: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Read one extra byte so any file larger than a valid key is detected.
 	data, err := io.ReadAll(io.LimitReader(f, maxEncryptionKeySize+1))
