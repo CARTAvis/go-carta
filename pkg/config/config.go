@@ -50,6 +50,12 @@ type TokenConfig struct {
 }
 
 type DeviceAuthConfig struct {
+	// Enabled turns on the device authorization flow (device_init, poll,
+	// refresh, logout, and the /device_link confirmation page). When false the
+	// controller does not register those endpoints. public_url is required when
+	// this is true.
+	Enabled bool `mapstructure:"enabled"`
+
 	Lifetime           string `mapstructure:"lifetime"`
 	MinInterval        string `mapstructure:"min_interval"`
 	MaxRefreshInterval string `mapstructure:"max_refresh_interval"`
@@ -196,6 +202,7 @@ func setControllerDefaults(v *viper.Viper) {
 	v.SetDefault("controller.token_config.access_token_age", "10m")
 	v.SetDefault("controller.token_config.refresh_token_age", "24h")
 
+	v.SetDefault("controller.device_auth.enabled", false)
 	v.SetDefault("controller.device_auth.lifetime", "10m")
 	v.SetDefault("controller.device_auth.min_interval", "5s")
 	v.SetDefault("controller.device_auth.max_refresh_interval", "24h")

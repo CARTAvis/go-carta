@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -84,6 +85,27 @@ func main() {
 	logger = helpers.NewLogger("carta-ctl", cfg.LogLevel)
 	slog.SetDefault(logger)
 
+	// Device authorization is opt-in, but once enabled it must be usable.
+	// Validate up front so a misconfiguration fails fast with a clear message
+	// instead of silently leaving the device endpoints unregistered.
+	if cfg.Controller.DeviceAuth.Enabled {
+		if strings.TrimSpace(cfg.Controller.DeviceAuth.PublicURL) == "" {
+			slog.Error("Device authorization is enabled but controller.device_auth.public_url is not set",
+				"hint", "set controller.device_auth.public_url to this controller's public base URL, or set controller.device_auth.enabled = false")
+			os.Exit(1)
+		}
+		if cfg.Controller.AuthMode == config.AuthNone {
+			slog.Error("Device authorization is enabled but controller.auth_mode is \"none\"",
+				"hint", "device authorization requires an authentication mode (pam, oidc, or both)")
+			os.Exit(1)
+		}
+		if cfg.Controller.DBConnectionString == "" {
+			slog.Error("Device authorization is enabled but controller.db_conn_string is not set",
+				"hint", "device authorization requires a database connection")
+			os.Exit(1)
+		}
+	}
+
 	runtimeSpawnerAddress = cfg.Controller.SpawnerAddress
 	if runtimeSpawnerAddress == "" {
 		runtimeSpawnerAddress = fmt.Sprintf("http://%s:%d", cfg.Spawner.Hostname, cfg.Spawner.Port)
@@ -159,8 +181,10 @@ func main() {
 			ConnString: cfg.Controller.DBConnectionString,
 		}
 		db.InitDb()
-		// Unauthenticated by design: this starts a login flow.
-		if cfg.Controller.AuthMode != config.AuthNone {
+		// Device authorization is opt-in: only register it when explicitly
+		// enabled. When enabled, DeviceInitHandler requires public_url so the
+		// verification link cannot be built from a spoofed Host header.
+		if cfg.Controller.AuthMode != config.AuthNone && cfg.Controller.DeviceAuth.Enabled {
 			// OIDC device sessions need the OIDC authenticator both to store
 			// encrypted offline tokens at login and to refresh upstream access
 			// tokens afterwards. It is nil for PAM-only deployments.
