@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS workspaces;
+DROP TABLE IF EXISTS snippets;
+DROP TABLE IF EXISTS layouts;
+DROP TABLE IF EXISTS preferences;
