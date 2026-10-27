@@ -88,7 +88,7 @@ func main() {
 
 	// Device authorization is opt-in, but once enabled it must be usable.
 	// Validate up front so a misconfiguration fails fast with a clear message
-	// instead of silently leaving the device endpoints unregistered.
+	// instead of silently leaving the device auth endpoints unregistered.
 	if cfg.Controller.DeviceAuth.Enabled {
 		if strings.TrimSpace(cfg.Controller.DeviceAuth.PublicURL) == "" {
 			slog.Error("Device authorization is enabled but controller.device_auth.public_url is not set",
@@ -105,6 +105,12 @@ func main() {
 				"hint", "device authorization requires a database connection")
 			os.Exit(1)
 		}
+	} else if cfg.Controller.AuthMode != config.AuthNone && cfg.Controller.DBConnectionString != "" {
+		// The device endpoints are only registered when device auth is enabled.
+		// Without them, device login requests fall through to the authenticated
+		// /api/ handler and fail with a confusing 401.
+		slog.Warn("Device authorization is not enabled; device login endpoints are not registered",
+			"hint", "set controller.device_auth.enabled = true and configure public_url to enable device login")
 	}
 
 	runtimeSpawnerAddress = cfg.Controller.SpawnerAddress
