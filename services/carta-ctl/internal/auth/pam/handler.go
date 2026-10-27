@@ -35,6 +35,7 @@ func NewLoginHandler(p loginAuthenticator) http.Handler {
 
 		switch r.Method {
 		case http.MethodPost:
+			defer func() { _ = r.Body.Close() }()
 			if err := r.ParseForm(); err != nil {
 				redirectToLoginWithError(w, r, "Invalid login request")
 				return

@@ -349,6 +349,7 @@ type deviceSignedRequest struct {
 func readDeviceSignedRequest(w http.ResponseWriter, r *http.Request) (deviceSignedRequest, []byte, bool) {
 	var req deviceSignedRequest
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	defer func() { _ = r.Body.Close() }()
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "Request body must be JSON containing key_fingerprint, timestamp and signature")
 		return req, nil, false
@@ -424,6 +425,7 @@ func DeviceInitHandler(store PendingAuthStore, cfg config.DeviceAuthConfig) (htt
 		// The client's Ed25519 public key is bound to this login up front, so only
 		// the holder of the private key can later collect the session.
 		r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+		defer func() { _ = r.Body.Close() }()
 		var req struct {
 			PublicKey string `json:"public_key"`
 		}

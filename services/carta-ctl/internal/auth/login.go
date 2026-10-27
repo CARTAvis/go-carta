@@ -190,6 +190,7 @@ func DeviceLinkPageHandler(store PendingAuthStore, cfg *config.Config) http.Hand
 		code := r.URL.Query().Get("code")
 		if r.Method == http.MethodPost {
 			r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+			defer func() { _ = r.Body.Close() }()
 			if err := r.ParseForm(); err != nil {
 				http.Error(w, "Invalid request", http.StatusBadRequest)
 				return
