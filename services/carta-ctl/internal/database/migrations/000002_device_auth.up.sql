@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS auth_pending (
     -- polling interval against the server clock and bounds replay)
     last_poll_ts       BIGINT,
 
+    -- Set when the user confirms the key fingerprint on the device-link page,
+    -- before signing in. Linking requires this approval.
+    approved_at        TIMESTAMPTZ,
+
     -- Set once the user has authenticated and linked the key to their account
     username           TEXT,
     linked_at          TIMESTAMPTZ,
@@ -76,6 +80,7 @@ ALTER TABLE auth_pending DROP COLUMN IF EXISTS device_code;
 ALTER TABLE auth_pending ADD COLUMN IF NOT EXISTS client_public_key TEXT NOT NULL DEFAULT '';
 ALTER TABLE auth_pending ADD COLUMN IF NOT EXISTS request_ip TEXT NOT NULL DEFAULT '';
 ALTER TABLE auth_pending ADD COLUMN IF NOT EXISTS last_poll_ts BIGINT;
+ALTER TABLE auth_pending ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
 ALTER TABLE auth_pending ADD COLUMN IF NOT EXISTS username TEXT;
 ALTER TABLE auth_pending ADD COLUMN IF NOT EXISTS linked_at TIMESTAMPTZ;
 ALTER TABLE auth_pending ADD COLUMN IF NOT EXISTS source TEXT;

@@ -21,14 +21,9 @@ import (
 )
 
 const (
-	// DeviceVerifyPath is the page where the user confirms linking a device
-	// code to their account after signing in.
+	// DeviceVerifyPath is the page where the user verifies a device's key
+	// fingerprint and approves it before signing in.
 	DeviceVerifyPath = "/device_link"
-
-	// deviceLinkCookieName holds a short-lived token proving that the browser
-	// user authenticated for a specific device login.
-	deviceLinkCookieName = "carta_device_link"
-	deviceLinkTicketAge  = 5 * time.Minute
 
 	// deviceTimestampSkew is the maximum allowed difference between a client's
 	// signed request timestamp and the server clock. Timestamps outside this
@@ -133,6 +128,10 @@ type PendingAuthRecord struct {
 	// any. It is used to enforce the polling interval against the server clock,
 	// never against the client-supplied timestamp.
 	LastPollTS *int64
+	// ApprovedAt is when the browser user confirmed that the displayed key
+	// fingerprint matches the client. It is nil until the user approves the
+	// fingerprint and is required before the login can be linked.
+	ApprovedAt *time.Time
 	// Username is empty until the login has been linked to a user account.
 	Username string
 	// Source is the authentication source used when the login was linked. It is
@@ -155,11 +154,16 @@ type PendingAuthStore interface {
 	// GetPendingAuth loads a pending device login by key fingerprint, returning
 	// ErrPendingAuthNotFound when there is no matching record.
 	GetPendingAuth(keyFingerprint string) (*PendingAuthRecord, error)
-	// LinkPendingAuth links an unexpired, unlinked login to a user and records
-	// the authentication source, the encrypted offline token, and the upstream
-	// access-token expiry in a single atomic operation so the token is bound to
-	// the linking identity. oidcRefreshToken and oidcAccessExpiry are nil/zero
-	// for PAM logins. It reports whether it did so.
+	// ApprovePendingAuth records that the browser user verified the key
+	// fingerprint shown on the device-link page. It reports false when the
+	// login is unknown, expired, or already linked. Approving an already
+	// approved login succeeds so a browser refresh is harmless.
+	ApprovePendingAuth(keyFingerprint string) (bool, error)
+	// LinkPendingAuth links an approved, unexpired, unlinked login to a user and
+	// records the authentication source, the encrypted offline token, and the
+	// upstream access-token expiry in a single atomic operation so the token is
+	// bound to the linking identity. oidcRefreshToken and oidcAccessExpiry are
+	// nil/zero for PAM logins. It reports whether it did so.
 	LinkPendingAuth(keyFingerprint, username string, source Source, oidcRefreshToken []byte, oidcAccessExpiry int64) (bool, error)
 	// RecordPendingAuthPoll records the server time (Unix seconds) of an accepted
 	// poll. It reports false when a newer server time was already recorded.
@@ -866,75 +870,6 @@ func DeviceLogoutHandler(sessions AuthSessionStore) http.Handler {
 			"username":        record.Username,
 		})
 	})
-}
-
-// SetDeviceLinkCookie records that the browser user authenticated for a
-// specific device login. The signed token is bound to the device code and is
-// accepted only by the device confirmation page. For OIDC device logins it also
-// carries the encrypted offline token and its upstream access-token expiry
-// (nil/zero for PAM) so they can be persisted together with the identity at
-// link time.
-func SetDeviceLinkCookie(w http.ResponseWriter, username string, source Source, deviceCode string, oidcRefreshToken []byte, oidcAccessExpiry int64) error {
-	if username == "" {
-		return fmt.Errorf("username is required")
-	}
-	if !validFingerprint(deviceCode) {
-		return fmt.Errorf("invalid device code")
-	}
-
-	expiresAt := time.Now().Add(deviceLinkTicketAge)
-	token, err := GenerateDeviceLinkToken(username, source, deviceCode, oidcRefreshToken, oidcAccessExpiry, expiresAt)
-	if err != nil {
-		return err
-	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     deviceLinkCookieName,
-		Value:    token,
-		Path:     DeviceVerifyPath,
-		Expires:  expiresAt,
-		MaxAge:   int(deviceLinkTicketAge.Seconds()),
-		HttpOnly: true,
-		Secure:   false,
-		SameSite: http.SameSiteLaxMode,
-	})
-	return nil
-}
-
-// clearDeviceLinkCookie removes the pending device-link ticket.
-func clearDeviceLinkCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     deviceLinkCookieName,
-		Value:    "",
-		Path:     DeviceVerifyPath,
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   false,
-		SameSite: http.SameSiteLaxMode,
-	})
-}
-
-// deviceLinkUser returns the authenticated user and the ticket claims from a
-// device-link ticket when the ticket was issued for the given device code. The
-// claims are returned so the caller can persist the ticket's OIDC offline token
-// and expiry together with the linking identity.
-func deviceLinkUser(r *http.Request, deviceCode string) (*User, *TokenClaims, bool) {
-	cookie, err := r.Cookie(deviceLinkCookieName)
-	if err != nil {
-		return nil, nil, false
-	}
-
-	claims, err := VerifyToken(cookie.Value)
-	if err != nil || claims.Type != TokenTypeDeviceLink || claims.DeviceCode != deviceCode || claims.Username == "" {
-		return nil, nil, false
-	}
-
-	user := &User{
-		Username: claims.Username,
-		Source:   NormalizeSource(claims.Source),
-		Claims:   map[string]any{},
-	}
-	return user, claims, true
 }
 
 // WriteDeviceLinkedPage renders the page shown after a device login has been

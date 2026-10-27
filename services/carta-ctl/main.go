@@ -41,8 +41,9 @@ func main() {
 	defer stop()
 
 	var (
-		pamAuth  pamwrap.Authenticator
-		oidcAuth *authoidc.OIDCAuthenticator
+		pamAuth          pamwrap.Authenticator
+		oidcAuth         *authoidc.OIDCAuthenticator
+		pendingAuthStore auth.PendingAuthStore
 	)
 
 	id := uuid.New()
@@ -185,6 +186,8 @@ func main() {
 		// enabled. When enabled, DeviceInitHandler requires public_url so the
 		// verification link cannot be built from a spoofed Host header.
 		if cfg.Controller.AuthMode != config.AuthNone && cfg.Controller.DeviceAuth.Enabled {
+			pendingAuthStore = &db
+
 			// OIDC device sessions need the OIDC authenticator both to store
 			// encrypted offline tokens at login and to refresh upstream access
 			// tokens afterwards. It is nil for PAM-only deployments.
@@ -193,6 +196,7 @@ func main() {
 				if cfg.Controller.OIDC.EncryptionKeyFile == "" {
 					slog.Warn("OIDC device sessions require controller.oidc.encryption_key_file; OIDC device login will fail until it is configured")
 				}
+				oidcAuth.SetPendingAuthStore(&db)
 				oidcRefresher = oidcAuth
 			}
 
@@ -240,12 +244,12 @@ func main() {
 	// Login pages and endpoints are also needed by CLI-only deployments, where
 	// a device login still requires a browser to authenticate.
 	if cfg.Controller.AuthMode != config.AuthNone {
-		http.Handle("/login", auth.LoginPageHandler(cfg))
+		http.Handle("/login", auth.LoginPageHandler(pendingAuthStore, cfg))
 		http.Handle("/login/logo", auth.ServeCartaLogo())
 		http.Handle("/login/banner", auth.ServeSiteBanner(cfg.Controller.LoginPage.SiteBanner))
 
 		if pamAuth != nil && (cfg.Controller.AuthMode == config.AuthPAM || cfg.Controller.AuthMode == config.AuthBoth) {
-			http.Handle("/api/auth/pam_login", authpam.NewLoginHandler(pamAuth))
+			http.Handle("/api/auth/pam_login", authpam.NewLoginHandler(pamAuth, pendingAuthStore))
 		}
 	}
 

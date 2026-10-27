@@ -77,20 +77,22 @@ type LoginPageData struct {
 	Error       string
 }
 
-// DeviceLinkPageData holds the data for the post-authentication device
-// confirmation page.
+// DeviceLinkPageData holds the data for the initial device approval page.
 type DeviceLinkPageData struct {
 	Title       string
 	Code        string
+	Fingerprint string
 	ConfirmCode string
-	Username    string
 	Action      string
 	Error       string
 }
 
 // LoginPageHandler returns an http.Handler that renders the unified login page.
 // Elements specific to PAM and OIDC are included only when those auth modes are active.
-func LoginPageHandler(cfg *config.Config) http.Handler {
+//
+// A device login must be approved before the login page is rendered, so the
+// user always sees and confirms the key fingerprint before entering credentials.
+func LoginPageHandler(store PendingAuthStore, cfg *config.Config) http.Handler {
 	authMode := cfg.Controller.AuthMode
 	lp := cfg.Controller.LoginPage
 
@@ -118,9 +120,35 @@ func LoginPageHandler(cfg *config.Config) http.Handler {
 		}
 
 		deviceCode := r.URL.Query().Get("device_code")
-		if deviceCode != "" && !validFingerprint(deviceCode) {
-			http.Error(w, "Invalid device code", http.StatusBadRequest)
-			return
+		if deviceCode != "" {
+			if !validFingerprint(deviceCode) {
+				http.Error(w, "Invalid device code", http.StatusBadRequest)
+				return
+			}
+			if store == nil {
+				http.Error(w, "Device login is not enabled", http.StatusBadRequest)
+				return
+			}
+			record, err := store.GetPendingAuth(deviceCode)
+			if errors.Is(err, ErrPendingAuthNotFound) {
+				http.Error(w, "This device code is invalid, expired, or already used", http.StatusGone)
+				return
+			}
+			if err != nil {
+				slog.Error("Failed to load pending device login", "error", err)
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
+			}
+			if record.Username != "" || !time.Now().Before(record.ExpiresAt) {
+				http.Error(w, "This device code is invalid, expired, or already used", http.StatusGone)
+				return
+			}
+			if record.ApprovedAt == nil {
+				query := url.Values{}
+				query.Set("code", deviceCode)
+				http.Redirect(w, r, DeviceVerifyPath+"?"+query.Encode(), http.StatusSeeOther)
+				return
+			}
 		}
 
 		pamAction := loginAction("/api/auth/pam_login", r.URL.Query().Get("redirectParams"), deviceCode)
@@ -168,14 +196,30 @@ func ServeSiteBanner(path string) http.Handler {
 	})
 }
 
-// DeviceLinkPageHandler renders the post-authentication device confirmation
-// page. The user signs in through the normal login page first; the login
-// handlers then issue a short-lived device-link ticket and redirect here. On
-// confirmation the pending device login is linked to the authenticated user.
+// DeviceLinkPageHandler renders the initial device approval page. It shows the
+// key fingerprint before the user signs in and requires an explicit
+// confirmation that the fingerprint matches the client. Once approved, the
+// user is sent to the login page and the login handlers link the device
+// directly; there is no post-authentication confirmation step.
 func DeviceLinkPageHandler(store PendingAuthStore, cfg *config.Config) http.Handler {
 	title := cfg.Controller.LoginPage.Title
 	if title == "" {
 		title = "CARTA"
+	}
+
+	render := func(w http.ResponseWriter, code, errorMessage string) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		data := DeviceLinkPageData{
+			Title:       title,
+			Code:        code,
+			Fingerprint: code,
+			ConfirmCode: FingerprintPrefix(code),
+			Action:      DeviceVerifyPath,
+			Error:       errorMessage,
+		}
+		if err := deviceLinkTmpl.Execute(w, data); err != nil {
+			slog.Error("Failed to render device link page", "error", err)
+		}
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -219,48 +263,32 @@ func DeviceLinkPageHandler(store PendingAuthStore, cfg *config.Config) http.Hand
 			return
 		}
 
-		user, claims, ok := deviceLinkUser(r, code)
-		if !ok {
-			clearDeviceLinkCookie(w)
+		if r.Method == http.MethodPost {
+			// The single confirmation box is the user's assertion that the
+			// fingerprint shown above matches the one displayed by the client.
+			if r.PostForm.Get("confirm") == "" {
+				render(w, code, "Please confirm that the fingerprint matches the client before continuing.")
+				return
+			}
+
+			approved, err := store.ApprovePendingAuth(code)
+			if err != nil {
+				slog.Error("Failed to approve device login", "error", err)
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
+			}
+			if !approved {
+				http.Error(w, "This device code is invalid, expired, or already used", http.StatusGone)
+				return
+			}
+
+			slog.Info("Approved device login fingerprint for sign-in")
 			query := url.Values{}
 			query.Set("device_code", code)
 			http.Redirect(w, r, "/login?"+query.Encode(), http.StatusSeeOther)
 			return
 		}
 
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-		if r.Method == http.MethodPost {
-			// Write the identity and the (encrypted) OIDC offline token together
-			// so the token is bound to the user who linked the login.
-			linked, err := store.LinkPendingAuth(code, user.Username, user.Source, claims.OIDCRefreshToken, claims.OIDCAccessExpiry)
-			if err != nil {
-				slog.Error("Failed to link device login", "username", user.Username, "error", err)
-				http.Error(w, "Internal server error", http.StatusInternalServerError)
-				return
-			}
-			if !linked {
-				clearDeviceLinkCookie(w)
-				http.Error(w, "This device code is invalid, expired, or already used", http.StatusGone)
-				return
-			}
-
-			clearDeviceLinkCookie(w)
-			slog.Info("Linked device login to user", "username", user.Username)
-			WriteDeviceLinkedPage(w, user.Username)
-			return
-		}
-
-		data := DeviceLinkPageData{
-			Title:       title,
-			Code:        code,
-			ConfirmCode: FingerprintPrefix(code),
-			Username:    user.Username,
-			Action:      DeviceVerifyPath,
-			Error:       r.URL.Query().Get("error"),
-		}
-		if err := deviceLinkTmpl.Execute(w, data); err != nil {
-			slog.Error("Failed to render device link page", "error", err)
-		}
+		render(w, code, r.URL.Query().Get("error"))
 	})
 }

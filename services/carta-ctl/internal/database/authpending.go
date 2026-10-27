@@ -75,6 +75,7 @@ func (h *DbConfig) GetPendingAuth(keyFingerprint string) (*auth.PendingAuthRecor
 		RequestIP        string         `db:"request_ip"`
 		ExpiresAt        time.Time      `db:"expires_at"`
 		LastPollTS       sql.NullInt64  `db:"last_poll_ts"`
+		ApprovedAt       sql.NullTime   `db:"approved_at"`
 		Username         sql.NullString `db:"username"`
 		Source           sql.NullString `db:"source"`
 		OIDCRefreshToken []byte         `db:"oidc_refresh_token"`
@@ -82,8 +83,8 @@ func (h *DbConfig) GetPendingAuth(keyFingerprint string) (*auth.PendingAuthRecor
 	}
 	err := h.db.Get(
 		&row,
-		`SELECT client_public_key, request_ip, expires_at, last_poll_ts, username, source,
-		        oidc_refresh_token, oidc_access_expiry
+		`SELECT client_public_key, request_ip, expires_at, last_poll_ts, approved_at,
+		        username, source, oidc_refresh_token, oidc_access_expiry
 		 FROM auth_pending
 		 WHERE key_fingerprint = $1`,
 		keyFingerprint,
@@ -111,6 +112,10 @@ func (h *DbConfig) GetPendingAuth(keyFingerprint string) (*auth.PendingAuthRecor
 	if row.LastPollTS.Valid {
 		timestamp := row.LastPollTS.Int64
 		record.LastPollTS = &timestamp
+	}
+	if row.ApprovedAt.Valid {
+		approvedAt := row.ApprovedAt.Time
+		record.ApprovedAt = &approvedAt
 	}
 	if row.OIDCAccessExpiry.Valid {
 		expiry := row.OIDCAccessExpiry.Time
@@ -161,13 +166,34 @@ func (h *DbConfig) ConsumePendingAuth(keyFingerprint string) (string, bool, erro
 	return username, true, nil
 }
 
-// LinkPendingAuth associates a pending device login with a user and records the
-// authentication source, the encrypted offline token, and the upstream
-// access-token expiry in a single atomic UPDATE so the token is bound to the
-// identity that links it. oidcRefreshToken/oidcAccessExpiry are nil/zero for
-// PAM logins, in which case those columns are written as NULL. It reports
-// whether a link was made: false means the fingerprint is unknown, expired, or
-// was already linked.
+// ApprovePendingAuth records that the browser user verified the key
+// fingerprint shown on the device-link page. It reports false when the login is
+// unknown, expired, or already linked. Approving an already-approved login is
+// idempotent.
+func (h *DbConfig) ApprovePendingAuth(keyFingerprint string) (bool, error) {
+	res, err := h.db.Exec(
+		`UPDATE auth_pending
+		 SET approved_at = COALESCE(approved_at, NOW())
+		 WHERE key_fingerprint = $1 AND expires_at > NOW() AND username IS NULL`,
+		keyFingerprint,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+// LinkPendingAuth associates an approved pending device login with a user and
+// records the authentication source, the encrypted offline token, and the
+// upstream access-token expiry in a single atomic UPDATE so the token is bound
+// to the identity that links it. oidcRefreshToken/oidcAccessExpiry are nil/zero
+// for PAM logins, in which case those columns are written as NULL. It reports
+// whether a link was made: false means the fingerprint is unknown, expired,
+// unapproved, or was already linked.
 func (h *DbConfig) LinkPendingAuth(keyFingerprint, username string, source auth.Source, oidcRefreshToken []byte, oidcAccessExpiry int64) (bool, error) {
 	// A nil/zero token writes NULL; otherwise pass the concrete value so the
 	// driver emits a proper BYTEA/TIMESTAMPTZ.
@@ -184,7 +210,8 @@ func (h *DbConfig) LinkPendingAuth(keyFingerprint, username string, source auth.
 		`UPDATE auth_pending
 		 SET username = $2, linked_at = NOW(), source = $3,
 		     oidc_refresh_token = $4, oidc_access_expiry = $5
-		 WHERE key_fingerprint = $1 AND expires_at > NOW() AND username IS NULL`,
+		 WHERE key_fingerprint = $1 AND expires_at > NOW() AND username IS NULL
+		   AND approved_at IS NOT NULL`,
 		keyFingerprint, username, string(auth.NormalizeSource(source)), refreshToken, accessExpiry,
 	)
 	if err != nil {

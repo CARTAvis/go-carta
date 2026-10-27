@@ -15,24 +15,14 @@ import (
 type TokenType string
 
 const (
-	TokenTypeAccess     TokenType = "access"
-	TokenTypeRefresh    TokenType = "refresh"
-	TokenTypeDeviceLink TokenType = "device_link"
+	TokenTypeAccess  TokenType = "access"
+	TokenTypeRefresh TokenType = "refresh"
 )
 
 type TokenClaims struct {
-	Username   string    `json:"username"`
-	Source     Source    `json:"source,omitempty"`
-	Type       TokenType `json:"type"`
-	DeviceCode string    `json:"device_code,omitempty"`
-
-	// OIDCRefreshToken and OIDCAccessExpiry carry an OIDC device login's
-	// encrypted offline token and the expiry (Unix seconds) of the upstream
-	// access token issued with it. They ride in the signed device-link ticket so
-	// the token can be written to the session atomically with the linking
-	// identity at link time. They are empty/zero for PAM device logins.
-	OIDCRefreshToken []byte `json:"oidc_refresh_token,omitempty"`
-	OIDCAccessExpiry int64  `json:"oidc_access_expiry,omitempty"`
+	Username string    `json:"username"`
+	Source   Source    `json:"source,omitempty"`
+	Type     TokenType `json:"type"`
 
 	jwt.RegisteredClaims
 }
@@ -108,40 +98,6 @@ func GenerateToken(username string, source Source, tokenType TokenType, expiresA
 		Username: username,
 		Source:   NormalizeSource(source),
 		Type:     tokenType,
-		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    tokenConfig.Issuer,
-			ExpiresAt: jwt.NewNumericDate(expiresAt),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-		},
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-	return token.SignedString(privateKey)
-}
-
-// GenerateDeviceLinkToken creates a short-lived token proving that a browser
-// user authenticated for a specific device login. It is accepted only by the
-// device link confirmation page. For OIDC device logins it also carries the
-// encrypted offline token and its upstream access-token expiry so the token can
-// be persisted atomically with the linking identity (nil/zero for PAM logins).
-func GenerateDeviceLinkToken(username string, source Source, deviceCode string, oidcRefreshToken []byte, oidcAccessExpiry int64, expiresAt time.Time) (string, error) {
-	if username == "" {
-		return "", fmt.Errorf("username is required")
-	}
-	if !validFingerprint(deviceCode) {
-		return "", fmt.Errorf("invalid device code")
-	}
-	if !expiresAt.After(time.Now()) {
-		return "", fmt.Errorf("token expiry must be in the future")
-	}
-
-	claims := TokenClaims{
-		Username:         username,
-		Source:           NormalizeSource(source),
-		Type:             TokenTypeDeviceLink,
-		DeviceCode:       deviceCode,
-		OIDCRefreshToken: oidcRefreshToken,
-		OIDCAccessExpiry: oidcAccessExpiry,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    tokenConfig.Issuer,
 			ExpiresAt: jwt.NewNumericDate(expiresAt),

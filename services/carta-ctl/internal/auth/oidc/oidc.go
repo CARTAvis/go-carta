@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,13 @@ import (
 	"github.com/CARTAvis/go-carta/services/carta-ctl/internal/auth"
 )
 
+// deviceAuthStore captures the pending-login operations needed to gate and
+// link a device login. It is nil when device authorization is disabled.
+type deviceAuthStore interface {
+	GetPendingAuth(keyFingerprint string) (*auth.PendingAuthRecord, error)
+	LinkPendingAuth(keyFingerprint, username string, source auth.Source, oidcRefreshToken []byte, oidcAccessExpiry int64) (bool, error)
+}
+
 type OIDCAuthenticator struct {
 	provider *gooidc.Provider
 	verifier *gooidc.IDTokenVerifier
@@ -29,6 +37,17 @@ type OIDCAuthenticator struct {
 	// cipher encrypts/decrypts OIDC offline tokens for device sessions. It is
 	// nil when no encryption key file has been configured.
 	cipher *tokenCipher
+
+	// pending links a device login directly once the OIDC callback has
+	// authenticated the user. It is nil unless device authorization is enabled.
+	pending deviceAuthStore
+}
+
+// SetPendingAuthStore enables device logins for this authenticator. The store
+// is consulted before redirecting to the identity provider and in the callback
+// when the authenticated login is linked.
+func (o *OIDCAuthenticator) SetPendingAuthStore(store deviceAuthStore) {
+	o.pending = store
 }
 
 func New(cfg config.OIDCConfig) (*OIDCAuthenticator, error) {
@@ -293,9 +312,36 @@ func (o *OIDCAuthenticator) LoginHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	deviceCode := r.URL.Query().Get("device_code")
-	if deviceCode != "" && !auth.ValidFingerprint(deviceCode) {
-		http.Error(w, "Invalid device code", http.StatusBadRequest)
-		return
+	if deviceCode != "" {
+		if !auth.ValidFingerprint(deviceCode) {
+			http.Error(w, "Invalid device code", http.StatusBadRequest)
+			return
+		}
+		if o.pending == nil {
+			http.Error(w, "Device login is not enabled", http.StatusBadRequest)
+			return
+		}
+		record, err := o.pending.GetPendingAuth(deviceCode)
+		if errors.Is(err, auth.ErrPendingAuthNotFound) {
+			http.Error(w, "This device code is invalid, expired, or already used", http.StatusGone)
+			return
+		}
+		if err != nil {
+			slog.Error("OIDC: failed to load pending device login", "error", err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		if record.Username != "" || !time.Now().Before(record.ExpiresAt) {
+			http.Error(w, "This device code is invalid, expired, or already used", http.StatusGone)
+			return
+		}
+		if record.ApprovedAt == nil {
+			// The fingerprint must be shown and approved before authentication.
+			query := url.Values{}
+			query.Set("code", deviceCode)
+			http.Redirect(w, r, auth.DeviceVerifyPath+"?"+query.Encode(), http.StatusSeeOther)
+			return
+		}
 	}
 
 	challenge := codeChallengeS256(verifier)
@@ -320,8 +366,8 @@ func (o *OIDCAuthenticator) LoginHandler(w http.ResponseWriter, r *http.Request)
 // CallbackHandler handles the redirect from Keycloak, exchanges the code
 // for tokens, validates the ID token, sets the session cookie, and redirects
 // back to the main UI (/). When the flow was started from a device login, it
-// instead issues a short-lived device-link ticket and redirects to the device
-// confirmation page.
+// links the approved pending login to the authenticated user directly and
+// shows the device-linked page.
 func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -398,15 +444,41 @@ func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Reque
 	}
 
 	// A device code in the callback means the browser was opened from a device
-	// login. Let the user confirm the link on the dedicated device page instead
-	// of starting a browser session. The offline token is stored (encrypted)
-	// against the pending login so the device session can refresh its upstream
-	// access token later.
+	// login. The fingerprint was approved before authentication, so link the
+	// device directly instead of starting a browser session or redirecting to a
+	// second confirmation page. The offline token is encrypted and written to
+	// the pending login together with the authenticated identity; it never
+	// leaves the server in a cookie.
 	if deviceCode != "" {
-		// Encrypt the offline token and carry it in the device-link ticket so it
-		// is written to the session atomically with the linking identity at link
-		// time. It must not be persisted against the pending login here, or the
-		// token could become detached from the user who ultimately links.
+		if o.pending == nil {
+			slog.Error("OIDC: device login is not configured", "key_fingerprint", deviceCode)
+			http.Error(w, "Device login is not configured", http.StatusInternalServerError)
+			return
+		}
+
+		record, err := o.pending.GetPendingAuth(deviceCode)
+		if errors.Is(err, auth.ErrPendingAuthNotFound) {
+			http.Error(w, "This device code is invalid, expired, or already used", http.StatusGone)
+			return
+		}
+		if err != nil {
+			slog.Error("OIDC: failed to load pending device login", "error", err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		if record.Username != "" || !time.Now().Before(record.ExpiresAt) {
+			http.Error(w, "This device code is invalid, expired, or already used", http.StatusGone)
+			return
+		}
+		if record.ApprovedAt == nil {
+			// This should not happen because the login handler gates on
+			// approval, but do not link without the user's confirmation.
+			query := url.Values{}
+			query.Set("code", deviceCode)
+			http.Redirect(w, r, auth.DeviceVerifyPath+"?"+query.Encode(), http.StatusSeeOther)
+			return
+		}
+
 		var encryptedRefreshToken []byte
 		var accessExpiry int64
 		if oauth2Token.RefreshToken == "" {
@@ -427,16 +499,19 @@ func (o *OIDCAuthenticator) CallbackHandler(w http.ResponseWriter, r *http.Reque
 			accessExpiry = oauth2Token.Expiry.Unix()
 		}
 
-		if err := auth.SetDeviceLinkCookie(w, user.Username, user.Source, deviceCode, encryptedRefreshToken, accessExpiry); err != nil {
-			slog.Error("OIDC: failed to create device link ticket", "username", user.Username, "error", err)
-			http.Error(w, "Session error", http.StatusInternalServerError)
+		linked, err := o.pending.LinkPendingAuth(deviceCode, user.Username, user.Source, encryptedRefreshToken, accessExpiry)
+		if err != nil {
+			slog.Error("OIDC: failed to link device login", "username", user.Username, "error", err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		if !linked {
+			http.Error(w, "This device code is invalid, expired, or already used", http.StatusGone)
 			return
 		}
 
-		slog.Info("OIDC: device login authenticated; awaiting confirmation", "username", user.Username, "key_fingerprint", deviceCode)
-		query := url.Values{}
-		query.Set("code", deviceCode)
-		http.Redirect(w, r, auth.DeviceVerifyPath+"?"+query.Encode(), http.StatusSeeOther)
+		slog.Info("OIDC: device login linked", "username", user.Username, "key_fingerprint", deviceCode)
+		auth.WriteDeviceLinkedPage(w, user.Username)
 		return
 	}
 

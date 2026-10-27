@@ -51,7 +51,7 @@ type TokenConfig struct {
 
 type DeviceAuthConfig struct {
 	// Enabled turns on the device authorization flow (device_init, poll,
-	// refresh, logout, and the /device_link confirmation page). When false the
+	// refresh, logout, and the /device_link approval page). When false the
 	// controller does not register those endpoints. public_url is required when
 	// this is true.
 	Enabled bool `mapstructure:"enabled"`

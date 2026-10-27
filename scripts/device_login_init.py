@@ -2,9 +2,9 @@
 """Log in to a CARTA controller from the command line with a device login.
 
 The script generates an Ed25519 keypair, registers the public key with the
-controller, prints the verification URL for the user to sign in and confirm
-the device link, then polls /api/auth/device_poll (signing each request with
-the private key) until the login is linked. On success a short-lived access
+controller, prints the verification URL for the user to approve the device
+fingerprint and sign in, then polls /api/auth/device_poll (signing each request
+with the private key) until the login is linked. On success a short-lived access
 token is saved to the state file. Use --refresh to obtain a new access token
 while the key registration is valid, and --revoke to revoke the session on
 the controller and delete the local key and state files.
@@ -374,8 +374,8 @@ def main() -> int:
     write_private_file(state_file, json.dumps(state, indent=2).encode())
 
     print(f"Confirmation code: {fingerprint[:8]}")
-    print("Check that this matches the code shown on the sign-in page.")
-    print("Open this URL in a browser, sign in, and confirm the code:")
+    print("Open this URL in a browser, check that the fingerprint matches,")
+    print("approve it, and then sign in:")
     print(f"  {verification_uri}")
     print("Waiting for the login to be confirmed...")
 

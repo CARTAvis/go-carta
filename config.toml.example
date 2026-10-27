@@ -131,7 +131,7 @@ refresh_token_age = "24h"
 [controller.device_auth]
 
 # Enable the device authorization flow (device_init, device_poll,
-# device_refresh, device_logout, and the /device_link confirmation page).
+# device_refresh, device_logout, and the /device_link approval page).
 # Disabled by default. When enabled, `public_url` below is required and the
 # controller will refuse to start without it.
 enabled = false
