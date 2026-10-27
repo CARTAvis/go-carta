@@ -2,6 +2,9 @@
 --
 -- All statements are idempotent so this migration can also be applied to an
 -- existing database that was created before migrations were introduced.
+--
+-- The matching down migration is intentionally a no-op: this schema predates
+-- the migration system, so rolling it back would destroy user data.
 
 CREATE TABLE IF NOT EXISTS preferences (
     username TEXT PRIMARY KEY,
